@@ -67,7 +67,7 @@ let CFG={name:HASR?'Restaurant':'QR Menu',tag:'',color:'#2e8b3d',gst:5,offer:'',
 const BASE=location.href.split('#')[0];
 let roleState='',myCafes={},ltab='owner',medit=-1,mq='',newV=true,lastCat='';
 let cartD={},GST=5,orders=[],calls=[],cart={},fdb=null,base=null,user=null,online=true,ownerState='',seen=null,seenC=null;
-let showMenu=false,cat='All',q='',tab='orders',offerTxt='';
+let showMenu=false,cat='All',q='',vo=false,tab='orders',offerTxt='';
 const SV=()=>firebase.database.ServerValue.TIMESTAMP;
 // ---------- app install (PWA) ----------
 let DIP=null;const STD=matchMedia('(display-mode: standalone)').matches||navigator.standalone===true,IOS=/iphone|ipad|ipod/i.test(navigator.userAgent);
@@ -107,7 +107,7 @@ async function updOrder(id,f){
 async function addCall(type,t,amt){
   if(base){
     if(!online){alert('Internet nahi hai. Waiter ko haath se bulao 🙂');return}
-    const up={};up['calls/c'+Date.now().toString(36)]=Object.assign({table:t,type,uid:user.uid,ts:SV()},amt?{amt}:{});up['rl/'+user.uid]=SV();
+    const up={};up['calls/c'+Date.now().toString(36)]=Object.assign({table:t,type,uid:user.uid,ts:SV()},amt?{amt}:{});up['rlc/'+user.uid]=SV();
     try{await base.update(up)}catch(e){alert('Abhi request bheji ja chuki hai, 15 second ruko.');return}
   }else{const a=lsGet(LSC);a.push(Object.assign({k:'c'+Date.now(),table:t,type,ts:Date.now()},amt?{amt}:{}));lsSet(LSC,a)}
   toast(type==='bill'?'🧾 Bill maanga gaya. Staff aa raha hai.':type==='paid'?'🙏 Shukriya! Staff payment check karke bill close karega.':'🙋 Waiter ko bata diya.');
@@ -151,6 +151,8 @@ async function attach(){
   if(want==='admin'&&user&&!user.isAnonymous){
     ownerState='checking';route();
     try{await base.child('owner').once('value');ownerState='ok'}catch(e){ownerState='no';route();return}
+    let adm=false;try{adm=(await fdb.ref('admins/'+user.uid).once('value')).val()===true}catch(e){}
+    if(!adm){try{const u=await base.child('ownerUid').once('value');if(!u.exists())await base.child('ownerUid').set(user.uid);else if(u.val()!==user.uid){ownerState='no';route();return}}catch(e){}}
     // only recent orders are synced (fast + stays inside free plan limits)
     listen(base.child('orders').orderByChild('ts').startAt(Date.now()-36*3600000),s=>{orders=Object.values(s.val()||{});adminTick()});
     listen(base.child('calls'),s=>{calls=Object.entries(s.val()||{}).map(([k,v])=>Object.assign({},v,{k}));adminTick()});
@@ -196,10 +198,11 @@ function home(){app.innerHTML=`<div class="card"><h2>${esc(CFG.name)}</h2><p cla
 <p><a class="btn" href="#admin">🧑‍🍳 Restaurant dashboard</a> <a class="btn o" href="#qr">🔳 Table QR codes</a> <a class="btn o" href="#table1">👀 Customer view</a></p>
 ${base?'':'<p class="mut">Demo: open <a href="#table5">Table 5</a>, place an order, then check the dashboard in another tab.</p>'}</div>`}
 const qurl=i=>ROOT+'?r='+R+'#table'+i;
+function cpLink(i){const u=qurl(i);const ok=()=>toast('🔗 Table '+i+' ka link copy ho gaya',2000);if(navigator.clipboard&&window.isSecureContext)navigator.clipboard.writeText(u).then(ok,()=>prompt('Link copy karo:',u));else prompt('Link copy karo:',u)}
 function qrTab(v){const n=+CFG.tables||20;
   v.innerHTML=`<div class="card noprint"><b>🔳 Table QR codes (${n} tables)</b><div class="mut">Har table pe uska QR lagao. Tables ki ginti ⚙ Setup mein badlo.</div><div class="row"><button onclick="printQR()">🖨 Sab print karo</button><button class="o" onclick="dlAll()">⬇ Sab download (PNG)</button></div></div><div class="qrs" id="qrs"></div>`;
   const box=$('#qrs');
-  for(let i=1;i<=n;i++){const d=document.createElement('div');d.className='card qrc';d.innerHTML=`<b>${esc(CFG.name)}</b><br><b style="font-size:20px">Table ${i}</b><div class="q"></div><span class="mut">📱 Scan karke order karo</span><div class="noprint" style="margin-top:6px"><button class="o" style="padding:5px 10px" onclick="dlQR(${i})">⬇ Download</button></div>`;box.appendChild(d);
+  for(let i=1;i<=n;i++){const d=document.createElement('div');d.className='card qrc';d.innerHTML=`<b>${esc(CFG.name)}</b><br><b style="font-size:20px">Table ${i}</b><div class="q"></div><span class="mut">📱 Scan karke order karo</span><div class="noprint" style="margin-top:6px"><button class="o" style="padding:5px 10px" onclick="dlQR(${i})">⬇ Download</button> <button class="o" style="padding:5px 10px" onclick="cpLink(${i})">🔗 Link copy</button></div>`;box.appendChild(d);
     try{new QRCode(d.querySelector('.q'),{text:qurl(i),width:150,height:150,colorDark:'#000',colorLight:'#fff'})}catch(e){d.querySelector('.q').textContent='QR unavailable'}}
 }
 function qrPng(i){const t=document.createElement('div');new QRCode(t,{text:qurl(i),width:480,height:480,colorDark:'#000',colorLight:'#fff',correctLevel:QRCode.CorrectLevel.M});const q=t.querySelector('canvas');
@@ -234,19 +237,19 @@ function menuPage(t,hasAct,thanks,cxN){
   app.innerHTML=`${hasAct?'':cxNote(cxN)}${thanks?'<div class="card">🙏 Shukriya! Aapka bill close ho gaya. Phir aana.</div>'+rateCard(thanks,t):''}${CFG.offer?`<div class="card" style="border-color:var(--ac2)">🎉 ${esc(CFG.offer)}</div>`:''}
 <div class="card"><div style="display:flex;justify-content:space-between;align-items:center"><span><b>Table ${t}</b>${CFG.tag?' · '+esc(CFG.tag):''}</span>${hasAct?'<a href="#" id="back">← Mera order</a>':''}</div>
 <input id="sq" placeholder="🔍 Dish dhoondo…" value="${esc(q)}" style="margin-top:8px">
-<div class="chips" id="chips">${cats.map(c=>`<button class="chip ${c===cat?'on':''}" data-c="${esc(c)}">${esc(c)}</button>`).join('')}</div></div>
+<div class="chips" id="chips">${MENU.some(m=>!m.v)?`<button class="chip ${vo?'on':''}" id="vchip">🟢 Sirf Veg</button>`:''}${cats.map(c=>`<button class="chip ${c===cat?'on':''}" data-c="${esc(c)}">${esc(c)}</button>`).join('')}</div></div>
 <div id="ml"></div>
 <div class="bar"><div id="sum" class="mut">Cart khaali hai</div><div class="row" style="margin-top:6px"><button id="go" style="flex:1" disabled>Order dekho →</button><button class="o" id="cw">🙋 Waiter</button></div></div>`;
   if(hasAct)$('#back').onclick=e=>{e.preventDefault();showMenu=false;route()};
   $('#sq').oninput=e=>{q=e.target.value;listMenu()};
-  document.querySelectorAll('#chips .chip').forEach(b=>b.onclick=()=>{cat=b.dataset.c;document.querySelectorAll('#chips .chip').forEach(x=>x.classList.toggle('on',x===b));listMenu()});
+  document.querySelectorAll('#chips .chip[data-c]').forEach(b=>b.onclick=()=>{cat=b.dataset.c;document.querySelectorAll('#chips .chip[data-c]').forEach(x=>x.classList.toggle('on',x===b));listMenu()});{const vc=$('#vchip');if(vc)vc.onclick=()=>{vo=!vo;vc.classList.toggle('on',vo);listMenu()}}
   $('#go').onclick=()=>review(t);$('#cw').onclick=()=>addCall('waiter',t);
   if(thanks)bindRate(thanks);
   listMenu();
 }
 function listMenu(){
   const el=$('#ml');if(!el)return;const ql=q.trim().toLowerCase();
-  const items=MENU.map((m,i)=>Object.assign({i},m)).filter(m=>(cat==='All'||m.c===cat)&&(!ql||m.n.toLowerCase().includes(ql)));
+  const items=MENU.map((m,i)=>Object.assign({i},m)).filter(m=>(cat==='All'||m.c===cat)&&(!vo||m.v)&&(!ql||m.n.toLowerCase().includes(ql)));
   if(!items.length){el.innerHTML='<div class="card mut">Kuch nahi mila.</div>';sumUpdate();return}
   const g={};items.forEach(m=>(g[m.c]=g[m.c]||[]).push(m));
   el.innerHTML=Object.entries(g).map(([c,a])=>`<h3 class="ch">${esc(c)}</h3><div class="grid">${a.map(m=>`<div class="card dish ${m.o?'oos':''}"><span class="em">${esc(m.e)}</span><div style="flex:1"><div class="n">${vdot(m.v)} ${esc(m.n)}</div><div class="mut">${rs(m.p)}${m.g?' · <span style="color:var(--ac)">options</span>':''}${m.o?' · <b style="color:var(--ac2)">Abhi khatam</b>':''}</div></div><div class="qty" id="q${m.i}"></div></div>`).join('')}</div>`).join('');
@@ -400,7 +403,8 @@ function gParse(t){return t.split('\n').map(l=>l.trim()).filter(Boolean).map((l,
   let name=l.slice(0,c).trim();const one=!/\+$/.test(name);name=name.replace(/\+$/,'').trim().slice(0,30);
   const o=l.slice(c+1).split(',').map(x=>x.trim()).filter(Boolean).map(x=>{const mm=x.match(/^(.*?)\s+(?:\+|₹|rs\.?)?\s*(\d+(?:\.\d+)?)\s*$/i);return mm&&mm[1].trim()?{n:mm[1].trim().slice(0,40),p:+mm[2]}:{n:x.slice(0,40),p:0}});
   if(!o.length)throw new Error('Line '+(li+1)+': koi option nahi');return{t:name,one,o:o.slice(0,20)}}).slice(0,6)}
-function gAdd(x){const t=$('#eg');t.value=(t.value.trim()?t.value.trim()+'\n':'')+x;t.focus()}
+function gAdd(x,i){const t=$('#eg');t.value=(t.value.trim()?t.value.trim()+'\n':'')+x;t.focus();if(i!=null)gAuto(i)}
+let gT;function gAuto(i){clearTimeout(gT);gT=setTimeout(()=>{const t=$('#eg');if(!t||!MENU[i])return;let g;try{g=gParse(t.value)}catch(e){return}MENU[i].g=g.length?g:undefined;mSave('⚙ Options saved ✅')},900)}
 function mSave(msg){clearTimeout(msT);msT=setTimeout(async()=>{try{await saveMenu();toast(msg||'Saved ✅',1500)}catch(e){alert('Save nahi hua: '+(e.code||e.message))}},250)}
 function menuEd(v){
   const cats=[...new Set(MENU.map(m=>m.c))];if(!lastCat)lastCat=cats[0]||'';
@@ -432,9 +436,9 @@ function drawML(){const el=$('#ml2');if(!el)return;const ql=mq.trim().toLowerCas
 function itemRow(i){const m=MENU[i];return`<div class="card mi ${m.o?'oos':''}"><span class="em">${esc(m.e)}</span><div style="flex:1;min-width:0"><div class="n">${vdot(m.v)} ${esc(m.n)}</div><div class="mut">${rs(m.p)}${m.g?' · ⚙ '+m.g.map(g=>esc(g.t)).join(', '):''}</div></div><button class="st ${m.o?'off':'on'}" onclick="mAvail(${i})">${m.o?'❌ Khatam':'✅ Hai'}</button><button class="o" title="Edit" onclick="medit=${i};drawML()">✏</button><button class="o" title="Delete" onclick="mDel(${i})">🗑</button></div>`}
 function editRow(i){const m=MENU[i];return`<div class="card" style="border:2px solid var(--ac)"><div class="mrow"><input id="ee" style="width:56px" value="${esc(m.e)}"><input id="en" style="flex:2;min-width:140px" value="${esc(m.n)}" placeholder="Dish"><input id="ep" style="width:90px" inputmode="numeric" value="${m.p}" placeholder="₹"></div><div class="mrow"><input id="ec" style="flex:1;min-width:130px" list="catl" value="${esc(m.c)}" placeholder="Category"><label><input type="checkbox" id="evg" ${m.v?'checked':''}>🟢 Veg</label></div>
 <div style="margin-top:8px"><b>⚙ Custom options</b> <span class="mut">(khud banao: size, add-ons, spice…)</span></div>
-<textarea id="eg" rows="3" placeholder="Size: Half 0, Full 80&#10;Add-ons+: Extra cheese 30, Butter 20">${esc(gTxt(m.g))}</textarea>
+<textarea id="eg" rows="3" oninput="gAuto(${i})" placeholder="Size: Half 0, Full 80&#10;Add-ons+: Extra cheese 30, Butter 20">${esc(gTxt(m.g))}</textarea>
 <div class="mut">Har line ek group: <code>Naam: option rate, option rate</code>. Rate = base rate ke upar extra (0 = free). Naam ke baad <b>+</b> lagao to customer kai chun sakta hai, warna ek hi.</div>
-<div class="row"><button class="o" type="button" onclick="gAdd('Size: Half 0, Full ${Math.round(m.p*0.6)||80}')">+ Half/Full</button><button class="o" type="button" onclick="gAdd('Size: Small 0, Medium 40, Large 80')">+ S/M/L</button><button class="o" type="button" onclick="gAdd('Add-ons+: Extra cheese 30, Extra butter 20')">+ Add-ons</button><button class="o" type="button" onclick="gAdd('Spice: Kam teekha 0, Medium 0, Zyada teekha 0')">+ Spice</button></div>
+<div class="row"><button class="o" type="button" onclick="gAdd('Size: Half 0, Full ${Math.round(m.p*0.6)||80}',${i})">+ Half/Full</button><button class="o" type="button" onclick="gAdd('Size: Small 0, Medium 40, Large 80',${i})">+ S/M/L</button><button class="o" type="button" onclick="gAdd('Add-ons+: Extra cheese 30, Extra butter 20',${i})">+ Add-ons</button><button class="o" type="button" onclick="gAdd('Spice: Kam teekha 0, Medium 0, Zyada teekha 0',${i})">+ Spice</button></div>
 <div class="row"><button onclick="mUpd(${i})">💾 Save</button><button class="o" onclick="medit=-1;drawML()">Cancel</button></div></div>`}
 function mUpd(i){const n=$('#en').value.trim().slice(0,60),p=+$('#ep').value.replace(/[^\d.]/g,'');if(!n||!p)return alert('Naam aur rate dono chahiye');
   let g;try{g=gParse($('#eg').value)}catch(e){return alert(e.message)}
@@ -468,11 +472,11 @@ function invoice(ids){
 
 // ---------- reseller ----------
 const slug=t=>t.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-+|-+$/g,'').slice(0,30);
-let SEC=null;
+let SEC=null,NEWUID=null;
 async function mkOwner(email,pw){
   SEC=SEC||firebase.initializeApp(FIREBASE_CONFIG,'sec');
   try{await SEC.auth().setPersistence(firebase.auth.Auth.Persistence.NONE)}catch(e){}
-  try{await SEC.auth().createUserWithEmailAndPassword(email,pw);await SEC.auth().signOut();return 'new'}
+  try{const c=await SEC.auth().createUserWithEmailAndPassword(email,pw);NEWUID=c.user.uid;await SEC.auth().signOut();return 'new'}
   catch(e){if(e.code==='auth/email-already-in-use')return 'exists';throw e}
 }
 function shareLogin(name,email,pw,exists){
@@ -492,7 +496,7 @@ async function superPanel(){
   await Promise.all(ids.map(async k=>{try{SO[k]=(await fdb.ref('restaurants/'+k+'/owner').once('value')).val()||''}catch(e){SO[k]=''}}));
   const fix={};ids.forEach(k=>{if(SO[k])fix['owners/'+ekey(SO[k])+'/'+k]=SL[k]});if(ids.length)fdb.ref().update(fix).catch(()=>{});
   app.innerHTML=`<div class="card"><h3 style="margin-top:0">➕ Naya hotel / cafe</h3>
-<input id="rn" placeholder="Cafe ka naam (jaise Sahara Cafe)"><input id="rid" placeholder="short-id (apne aap banega)"><input id="re" type="email" placeholder="Owner ka email (isse login karega)"><input id="rp" placeholder="Owner ka password (6+ characters)" autocomplete="new-password">
+<input id="rn" placeholder="Cafe ka naam (jaise Sahara Cafe)"><input id="rid" placeholder="short-id (apne aap banega)"><input id="re" type="email" placeholder="Owner ka email (isse login karega)"><input id="rp" type="password" placeholder="Owner ka password (6+ characters)" autocomplete="new-password"><label class="mut" style="display:block;margin:2px 0 6px"><input type="checkbox" onchange="$('#rp').type=this.checked?'text':'password'"> Password dikhao</label>
 <label class="mut">Menu</label><select id="rcp"><option value="">Sample menu (12 dishes)</option><option value="-">Khaali menu</option>${ids.map(k=>`<option value="${esc(k)}">Copy: ${esc(SL[k])}</option>`).join('')}</select>
 <button style="width:100%;margin-top:6px" id="mkb" onclick="mk()">✅ Cafe banao + owner login banao</button></div>
 <div class="card"><b>Aapke cafes (${ids.length})</b>${ids.map(k=>`<div style="border-top:1px solid var(--bd);padding:8px 0;margin-top:6px"><b>${esc(SL[k])}</b> <span class="mut">(${esc(k)})</span><div class="mut">Owner: ${esc(SO[k]||'—')}</div><div class="row"><a class="btn" href="${ROOT}?r=${k}#admin">🧑‍🍳 Dashboard</a><a class="btn o" target="_blank" href="${ROOT}?r=${k}#table1">👀 Menu</a><button class="o" onclick="ownLogin('${k}')">🔑 Login</button><button class="o" onclick="chOwner('${k}')">✉ Owner badlo</button><button class="r" onclick="delCafe('${k}')">🗑</button></div></div>`).join('')||'<p class="mut">Abhi koi nahi</p>'}</div>
@@ -510,18 +514,18 @@ async function mk(){
     if(cp==='-')menu=JSON.stringify([{n:'Masala Chai',p:30,e:'☕',c:'Drinks',v:true,o:false}]);
     else if(cp){const v=(await fdb.ref('restaurants/'+cp+'/menu').once('value')).val();if(v&&JSON.parse(v).length)menu=v}
     const st=await mkOwner(email,pw);
-    if(st==='exists'&&!confirm(email+' ka login pehle se bana hua hai. Owner apna purana password use karega. Aage badhein?')){done();return}
-    const up={};up['restaurants/'+id+'/config']={name,tag:'',color:'#2e8b3d',gst:5,offer:'',upi:'',tables:20,wa:'',grev:''};up['restaurants/'+id+'/menu']=menu;up['restaurants/'+id+'/owner']=email;up['index/'+id]=name;up['owners/'+ekey(email)+'/'+id]=name;
+    if(st==='exists'&&!confirm(email+' ka login pehle se bana hua hai. Owner apna purana password use karega.\n\n⚠ Agar ye account owner ne khud nahi banaya, to Cancel karke dusra email do. Aage badhein?')){done();return}
+    const up={};up['restaurants/'+id+'/config']={name,tag:'',color:'#2e8b3d',gst:5,offer:'',upi:'',tables:20,wa:'',grev:''};up['restaurants/'+id+'/menu']=menu;up['restaurants/'+id+'/owner']=email;if(st==='new')up['restaurants/'+id+'/ownerUid']=NEWUID;up['index/'+id]=name;up['owners/'+ekey(email)+'/'+id]=name;
     await fdb.ref().update(up);done();await superPanel();shareLogin(name,email,pw,st==='exists');
   }catch(e){done();authErr(e)}
 }
 async function ownLogin(k){const email=SO[k];if(!email)return alert('Pehle owner email set karo (✉ Owner badlo)');
   const pw=prompt('Naya login banane ke liye '+email+' ka password likho (6+ characters).\nAgar account pehle se hai to reset link email pe jayega.','');if(pw==null)return;
-  try{if(pw.length>=6){const st=await mkOwner(email,pw);if(st==='new')return shareLogin(SL[k],email,pw,false)}
+  try{if(pw.length>=6){const st=await mkOwner(email,pw);if(st==='new'){await fdb.ref('restaurants/'+k+'/ownerUid').set(NEWUID);return shareLogin(SL[k],email,pw,false)}}
     if(confirm(email+' ka account pehle se hai. Password reset link us email pe bhejein?')){await firebase.auth().sendPasswordResetEmail(email);alert('Reset link bhej diya. Owner apna email check kare (Spam bhi).')}
   }catch(e){authErr(e)}}
 async function chOwner(k){const old=SO[k]||'',e=(prompt('Naya owner email:',old)||'').trim().toLowerCase();if(!e||e===old)return;if(!/^\S+@\S+\.\S+$/.test(e))return alert('Email sahi nahi hai');
-  const up={};up['restaurants/'+k+'/owner']=e;up['owners/'+ekey(e)+'/'+k]=SL[k];if(old)up['owners/'+ekey(old)+'/'+k]=null;
+  const up={};up['restaurants/'+k+'/owner']=e;up['restaurants/'+k+'/ownerUid']=null;up['owners/'+ekey(e)+'/'+k]=SL[k];if(old)up['owners/'+ekey(old)+'/'+k]=null;
   try{await fdb.ref().update(up);await superPanel();if(confirm('Owner badal gaya ✅ Ab '+e+' ka login banayein?'))ownLogin(k)}catch(x){alert('Error: '+(x.code||x.message))}}
 async function delCafe(k){if(prompt('Pakka delete? Saare orders aur menu hamesha ke liye chale jayenge.\nConfirm ke liye short-id likho: '+k)!==k)return;
   const up={};up['restaurants/'+k]=null;up['index/'+k]=null;if(SO[k])up['owners/'+ekey(SO[k])+'/'+k]=null;
