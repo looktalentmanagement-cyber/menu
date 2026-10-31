@@ -108,7 +108,7 @@ async function addCall(type,t,amt){
   if(base){
     if(!online){alert('Internet nahi hai. Waiter ko haath se bulao 🙂');return}
     const up={};up['calls/c'+Date.now().toString(36)]=Object.assign({table:t,type,uid:user.uid,ts:SV()},amt?{amt}:{});up['rlc/'+user.uid]=SV();
-    try{await base.update(up)}catch(e){alert('Abhi request bheji ja chuki hai, 15 second ruko.');return}
+    try{await base.update(up)}catch(e){delete up['rlc/'+user.uid];up['rl/'+user.uid]=SV();try{await base.update(up)}catch(e2){alert('Abhi request bheji ja chuki hai, 15 second ruko.');return}}
   }else{const a=lsGet(LSC);a.push(Object.assign({k:'c'+Date.now(),table:t,type,ts:Date.now()},amt?{amt}:{}));lsSet(LSC,a)}
   toast(type==='bill'?'🧾 Bill maanga gaya. Staff aa raha hai.':type==='paid'?'🙏 Shukriya! Staff payment check karke bill close karega.':'🙋 Waiter ko bata diya.');
 }
