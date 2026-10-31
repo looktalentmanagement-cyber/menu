@@ -527,7 +527,7 @@ async function ownLogin(k){const email=SO[k];if(!email)return alert('Pehle owner
 async function chOwner(k){const old=SO[k]||'',e=(prompt('Naya owner email:',old)||'').trim().toLowerCase();if(!e||e===old)return;if(!/^\S+@\S+\.\S+$/.test(e))return alert('Email sahi nahi hai');
   const up={};up['restaurants/'+k+'/owner']=e;up['restaurants/'+k+'/ownerUid']=null;up['owners/'+ekey(e)+'/'+k]=SL[k];if(old)up['owners/'+ekey(old)+'/'+k]=null;
   try{await fdb.ref().update(up);await superPanel();if(confirm('Owner badal gaya ✅ Ab '+e+' ka login banayein?'))ownLogin(k)}catch(x){alert('Error: '+(x.code||x.message))}}
-async function delCafe(k){if(prompt('Pakka delete? Saare orders aur menu hamesha ke liye chale jayenge.\nConfirm ke liye short-id likho: '+k)!==k)return;
+async function delCafe(k){if((prompt('Pakka delete? Saare orders aur menu hamesha ke liye chale jayenge.\nConfirm ke liye short-id likho: '+k)||'').trim().toLowerCase()!==k.toLowerCase())return;
   const up={};up['restaurants/'+k]=null;up['index/'+k]=null;if(SO[k])up['owners/'+ekey(SO[k])+'/'+k]=null;
   try{await fdb.ref().update(up);toast('Delete ho gaya');superPanel()}catch(e){alert('Error: '+(e.code||e.message))}}
 init();
