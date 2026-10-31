@@ -41,7 +41,7 @@
             "items": {
               ".validate": "newData.hasChildren()",
               "$i": {
-                ".validate": "$i.matches(/^[0-9]$|^[1-4][0-9]$/)"
+                ".validate": "$i.matches(/^[1-4]?[0-9]$/)"
               }
             },
             "note": {
