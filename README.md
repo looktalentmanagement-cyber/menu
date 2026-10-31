@@ -8,7 +8,7 @@ Ek hi app, har restaurant/cafe ka alag naam, menu, offer, colour aur owner login
 3. **Security**: PIN hata diya. Owner email + password se login (email verify zaroori). Firebase rules locked: customer sirf apne orders dekh sakta hai, phone numbers sirf owner ko dikhte hain, 15 second mein ek hi order/request (spam control).
 4. **Naye order pe awaaz + vibration + toast + tab title blink**. Waiter/Bill request pe bhi. Screen on rehti hai (supported phones pe).
 5. **Menu**: categories, search, veg/non-veg 🟢🔴 mark, "Abhi khatam" (out of stock). Order se pehle **cart review**, quantity badlo, **special instruction** (kam teekha, Jain…), total GST ke saath pehle hi dikhta hai.
-6. **🙋 Waiter bulao / 🧾 Bill mangao** buttons, aur **UPI se pay** (owner Setup mein UPI ID daale).
+6. **🙋 Waiter bulao / 🧾 Bill mangao** buttons. App se koi payment nahi hota — payment cafe staff ko (cafe apna scanner WhatsApp pe bhejta hai).
 7. Extra: order cancel, aaj ki sale, tables count setting, WhatsApp offers sirf un customers ko jinhone haan bola, purane bills ka GST % nahi badalta, "WOW" naam hata diya.
 
 ## Setup (ek baar)
@@ -27,7 +27,7 @@ Ek hi app, har restaurant/cafe ka alag naam, menu, offer, colour aur owner login
 1. `#super` → naam, short-id (jaise `sahara-cafe`), **owner ka email** → Create.
 2. Owner ko do: `.../?r=sahara-cafe#admin` (dashboard) aur `.../?r=sahara-cafe#qr` (table QR).
 3. Owner dashboard pe "Naya account" se **wahi email** use karke account banata hai, email verify karta hai, login.
-4. Owner khud: **🍽 Menu** (dishes, category, veg, available), **📣 Offers**, **⚙ Setup** (naam, colour, GST, UPI ID, tables).
+4. Owner khud: **🍽 Menu** (dishes, category, veg, available), **📣 Offers**, **⚙ Setup** (naam, colour, GST, WhatsApp, tables).
 5. Kitchen tablet pe dashboard khol ke ek baar **🔕 Sound ON karo** dabana (browser ka rule hai).
 
 ## Links
@@ -55,7 +55,6 @@ Har restaurant ke liye database mein `restaurants/<id>/owner` = owner ka email (
 - Order pe **✅ Accept** → **🍽 Ready / Served** → table close.
 - **🖨 KOT** button: kitchen ke liye bade font mein slip.
 - **⚠ Rate check**: agar order ka rate menu se alag ho (koi link se chhed-chhaad kare) ya dish menu mein na ho, laal warning.
-- Customer "✅ Maine pay kar diya" dabaye to alert: "💳 Customer bola: pay kar diya ₹X". UPI app mein paisa check karke hi close karo.
 - Table close karte hi us table ke bill/payment alerts apne aap hat jaate hain.
 
 **Customer**
