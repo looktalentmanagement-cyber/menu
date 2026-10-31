@@ -2,6 +2,7 @@
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>QR Ordering</title>
+<link rel="manifest" href="manifest.json"><meta name="theme-color" content="#2e8b3d"><link rel="apple-touch-icon" href="apple-touch-icon.png"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="mobile-web-app-capable" content="yes">
 <style>
 :root{--bg:#fffaf3;--card:#fff;--tx:#2a2118;--mut:#7a6d5f;--ac:#2e8b3d;--ac2:#e8590c;--bd:#eadfce;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
 @media(prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#17130f;--card:#241e18;--tx:#f3ece2;--mut:#a89b8b;--bd:#3a3128;color-scheme:dark}}
@@ -54,7 +55,7 @@ const FIREBASE_CONFIG={apiKey:"AIzaSyBuG7ZWKH74-cOejWzw8N_X-PoEn61Tvus",authDoma
 
 // Menu item: n=name, p=price, e=emoji, c=category, v=veg(true/false), o=out of stock
 const DEF=[["Paneer Butter Masala",240,"🧀","Main Course"],["Dal Makhani",200,"🍲","Main Course"],["Palak Paneer",230,"🥬","Main Course"],["Veg Biryani",220,"🍛","Rice & Breads"],["Butter Naan",45,"🫓","Rice & Breads"],["Jeera Rice",120,"🍚","Rice & Breads"],["Masala Dosa",130,"🥞","Snacks"],["Chole Bhature",150,"🫘","Snacks"],["Veg Thali",260,"🍱","Thali"],["Gulab Jamun",80,"🍮","Dessert"],["Masala Chai",30,"☕","Drinks"],["Sweet Lassi",70,"🥛","Drinks"]].map(a=>({n:a[0],p:a[1],e:a[2],c:a[3],v:true,o:false}));
-const norm=m=>Array.isArray(m)?{n:m[0],p:+m[1]||0,e:m[2]||'🍽',c:'Menu',v:true,o:false}:{n:m.n,p:+m.p||0,e:m.e||'🍽',c:m.c||'Menu',v:m.v!==false,o:!!m.o};
+const norm=m=>Array.isArray(m)?{n:m[0],p:+m[1]||0,e:m[2]||'🍽',c:'Menu',v:true,o:false}:{n:m.n,p:+m.p||0,e:m.e||'🍽',c:m.c||'Menu',v:m.v!==false,o:!!m.o,g:Array.isArray(m.g)&&m.g.length?m.g:undefined};
 let MENU=DEF.slice();
 
 const $=s=>document.querySelector(s),app=$('#app'),esc=s=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -65,9 +66,16 @@ const ekey=e=>String(e||'').toLowerCase().replace(/\./g,',');
 let CFG={name:HASR?'Restaurant':'QR Menu',tag:'',color:'#2e8b3d',gst:5,offer:'',upi:'',tables:20,wa:'',grev:''},cfgState='loading';
 const BASE=location.href.split('#')[0];
 let roleState='',myCafes={},ltab='owner',medit=-1,mq='',newV=true,lastCat='';
-let GST=5,orders=[],calls=[],cart={},fdb=null,base=null,user=null,online=true,ownerState='',seen=null,seenC=null;
+let cartD={},GST=5,orders=[],calls=[],cart={},fdb=null,base=null,user=null,online=true,ownerState='',seen=null,seenC=null;
 let showMenu=false,cat='All',q='',tab='orders',offerTxt='';
 const SV=()=>firebase.database.ServerValue.TIMESTAMP;
+// ---------- app install (PWA) ----------
+let DIP=null;const STD=matchMedia('(display-mode: standalone)').matches||navigator.standalone===true,IOS=/iphone|ipad|ipod/i.test(navigator.userAgent);
+if('serviceWorker' in navigator)addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
+addEventListener('beforeinstallprompt',e=>{e.preventDefault();DIP=e;fillIB()});
+addEventListener('appinstalled',()=>{DIP=null;fillIB();toast('✅ App install ho gaya! Home screen pe "QR Menu" icon dekho.')});
+function fillIB(){const h=STD?'':DIP?'<button class="r" onclick="installApp()">📲 App install karo</button>':IOS?'<span class="mut">📲 App: Safari mein Share ⬆ → "Add to Home Screen"</span>':'<span class="mut">📲 App: Chrome ⋮ menu → "Install app" / "Add to Home screen"</span>';document.querySelectorAll('.ib').forEach(x=>x.innerHTML=h)}
+async function installApp(){if(!DIP)return;DIP.prompt();try{await DIP.userChoice}catch(e){}DIP=null;fillIB()}
 
 // ---------- demo storage (only when no Firebase config: works in one browser) ----------
 const LS='qr_orders_'+R,LSC='qr_calls_'+R;
@@ -241,13 +249,23 @@ function listMenu(){
   const items=MENU.map((m,i)=>Object.assign({i},m)).filter(m=>(cat==='All'||m.c===cat)&&(!ql||m.n.toLowerCase().includes(ql)));
   if(!items.length){el.innerHTML='<div class="card mut">Kuch nahi mila.</div>';sumUpdate();return}
   const g={};items.forEach(m=>(g[m.c]=g[m.c]||[]).push(m));
-  el.innerHTML=Object.entries(g).map(([c,a])=>`<h3 class="ch">${esc(c)}</h3><div class="grid">${a.map(m=>`<div class="card dish ${m.o?'oos':''}"><span class="em">${esc(m.e)}</span><div style="flex:1"><div class="n">${vdot(m.v)} ${esc(m.n)}</div><div class="mut">${rs(m.p)}${m.o?' · <b style="color:var(--ac2)">Abhi khatam</b>':''}</div></div><div class="qty" id="q${m.i}"></div></div>`).join('')}</div>`).join('');
+  el.innerHTML=Object.entries(g).map(([c,a])=>`<h3 class="ch">${esc(c)}</h3><div class="grid">${a.map(m=>`<div class="card dish ${m.o?'oos':''}"><span class="em">${esc(m.e)}</span><div style="flex:1"><div class="n">${vdot(m.v)} ${esc(m.n)}</div><div class="mut">${rs(m.p)}${m.g?' · <span style="color:var(--ac)">options</span>':''}${m.o?' · <b style="color:var(--ac2)">Abhi khatam</b>':''}</div></div><div class="qty" id="q${m.i}"></div></div>`).join('')}</div>`).join('');
   items.forEach(m=>{if(!m.o)qtyUI(m.i)});sumUpdate();
 }
-function qtyUI(i){const n=MENU[i].n,c=cart[n]||0,e=$('#q'+i);if(!e)return;
-  e.innerHTML=c?`<button class="o" onclick="chg(${i},-1)">−</button><b>${c}</b><button onclick="chg(${i},1)">+</button>`:`<button onclick="chg(${i},1)">+ Add</button>`}
-function chg(i,d){const n=MENU[i].n;cart[n]=Math.max(0,(cart[n]||0)+d);qtyUI(i);sumUpdate()}
-function cartItems(){return Object.keys(cart).filter(n=>cart[n]>0).map(n=>{const m=MENU.find(x=>x.n===n);return m&&!m.o?{n,p:m.p,q:cart[n]}:null}).filter(Boolean)}
+function qtyUI(i){const m=MENU[i],n=m.n,e=$('#q'+i);if(!e)return;
+  if(m.g){const c=Object.keys(cart).filter(k=>cart[k]>0&&(cartD[k]||{}).n===n).reduce((a,k)=>a+cart[k],0);e.innerHTML=(c?`<b>${c}</b> `:'')+`<button onclick="optPick(${i})">+ Add</button>`;return}
+  const c=cart[n]||0;e.innerHTML=c?`<button class="o" onclick="chg(${i},-1)">−</button><b>${c}</b><button onclick="chg(${i},1)">+</button>`:`<button onclick="chg(${i},1)">+ Add</button>`}
+function chg(i,d){const n=MENU[i].n;cart[n]=Math.max(0,(cart[n]||0)+d);cartD[n]={n,sel:[]};qtyUI(i);sumUpdate()}
+function optPick(i){const m=MENU[i],md=document.createElement('div');md.className='modal';
+  md.innerHTML=`<div class="sheet"><h3 style="margin-top:0">${esc(m.e)} ${esc(m.n)}</h3>${m.g.map((g,gi)=>`<div style="margin:10px 0"><b>${esc(g.t)}</b> <span class="mut">${g.one?'(ek chuno)':'(jitne chaho)'}</span>${g.o.map((o,oi)=>`<label style="display:flex;align-items:center;justify-content:space-between;padding:8px 2px;border-bottom:1px solid var(--bd)"><span style="display:flex;align-items:center"><input type="${g.one?'radio':'checkbox'}" name="g${gi}" value="${gi}:${oi}" ${g.one&&oi===0?'checked':''}>${esc(o.n)}</span><span class="mut">${o.p?'+'+rs(o.p):''}</span></label>`).join('')}</div>`).join('')}
+<div class="row"><button id="opa" style="flex:1"></button><button class="o" onclick="this.closest('.modal').remove()">Cancel</button></div></div>`;
+  document.body.appendChild(md);
+  const sel=()=>[...md.querySelectorAll('input:checked')].map(x=>x.value),pr=()=>m.p+sel().reduce((a,v)=>{const[g,o]=v.split(':').map(Number);return a+(+m.g[g].o[o].p||0)},0);
+  const up=()=>$('#opa').textContent='+ Add · '+rs(pr());md.querySelectorAll('input').forEach(x=>x.onchange=up);up();
+  $('#opa').onclick=()=>{const s=sel(),k=s.length?m.n+'|'+s.join(','):m.n;cart[k]=(cart[k]||0)+1;cartD[k]={n:m.n,sel:s};md.remove();qtyUI(i);sumUpdate();toast('✅ Cart mein add',1200)}}
+function cartItems(){return Object.keys(cart).filter(k=>cart[k]>0).map(k=>{const d=cartD[k]||{n:k,sel:[]},m=MENU.find(x=>x.n===d.n);if(!m||m.o)return null;
+  let p=m.p;const lab=[];for(const v of d.sel){const[g,o]=v.split(':').map(Number),oo=m.g&&m.g[g]&&m.g[g].o[o];if(!oo)return null;p+=+oo.p||0;lab.push(oo.n)}
+  const it={n:lab.length?m.n+' ('+lab.join(', ')+')':m.n,p,q:cart[k]};if(lab.length)it.b=m.n;Object.defineProperty(it,'k',{value:k,enumerable:false});return it}).filter(Boolean)}
 function sumUpdate(){const it=cartItems(),x=tot({items:it}),s=$('#sum'),g=$('#go');if(!s)return;
   s.textContent=it.length?`${it.reduce((a,i)=>a+i.q,0)} items · Total ${rs(x.t)}${GST?' (GST incl.)':''}`:'Cart khaali hai';g.disabled=!it.length}
 function review(t){
@@ -260,10 +278,10 @@ function review(t){
 <div class="row"><button id="cf" style="flex:1"></button><button class="o" id="cl">← Aur add karo</button></div></div>`;
   document.body.appendChild(m);
   const draw=()=>{const it=cartItems();if(!it.length){m.remove();listMenu();return}const x=tot({items:it});
-    $('#rv').innerHTML=`<table>${it.map(i=>{const k=MENU.findIndex(z=>z.n===i.n);return`<tr><td>${esc(i.n)}<div class="mut">${rs(i.p)}</div></td><td class="r" style="white-space:nowrap"><button class="o" style="padding:2px 9px" data-k="${k}" data-d="-1">−</button> <b>${i.q}</b> <button style="padding:2px 9px" data-k="${k}" data-d="1">+</button></td><td class="r">${rs(i.p*i.q)}</td></tr>`}).join('')}
+    $('#rv').innerHTML=`<table>${it.map(i=>{const k=esc(i.k);return`<tr><td>${esc(i.n)}<div class="mut">${rs(i.p)}</div></td><td class="r" style="white-space:nowrap"><button class="o" style="padding:2px 9px" data-k="${k}" data-d="-1">−</button> <b>${i.q}</b> <button style="padding:2px 9px" data-k="${k}" data-d="1">+</button></td><td class="r">${rs(i.p*i.q)}</td></tr>`}).join('')}
 <tr><td colspan="2">Subtotal</td><td class="r">${rs(x.s)}</td></tr>${GST?`<tr><td colspan="2">GST ${GST}%</td><td class="r">${rs(x.g)}</td></tr>`:''}<tr><td colspan="2"><b>Total</b></td><td class="r"><b>${rs(x.t)}</b></td></tr></table>`;
     $('#cf').textContent='✅ Confirm order · '+rs(x.t);
-    m.querySelectorAll('#rv button').forEach(b=>b.onclick=()=>{const n=MENU[+b.dataset.k].n;cart[n]=Math.max(0,(cart[n]||0)+(+b.dataset.d));draw()})};
+    m.querySelectorAll('#rv button').forEach(b=>b.onclick=()=>{const k=b.dataset.k;cart[k]=Math.max(0,(cart[k]||0)+(+b.dataset.d));draw()})};
   draw();
   $('#cl').onclick=()=>{m.remove();listMenu()};
   $('#cf').onclick=()=>place(t,m);
@@ -275,7 +293,7 @@ async function place(t,m){
   const name=$('#nm').value.trim().slice(0,40);lw('cust',{name,phone:ph});
   const o={id:'o'+Date.now().toString(36)+Math.random().toString(36).slice(2,5),table:t,items,note:$('#nt').value.trim().slice(0,200),phone:ph,name,optin:!!(ph&&$('#oi').checked),gst:GST,status:'new'};
   const b=$('#cf');b.disabled=true;b.textContent='Bhej rahe hain…';
-  if(await addOrder(o)){cart={};showMenu=false;m.remove();toast('✅ Order kitchen tak pahunch gaya!');route()}
+  if(await addOrder(o)){cart={};cartD={};showMenu=false;m.remove();toast('✅ Order kitchen tak pahunch gaya!');route()}
   else{b.disabled=false;b.textContent='✅ Confirm order · '+rs(tot({items}).t)}
 }
 function placed(t,act,cxN){
@@ -301,7 +319,7 @@ function landing(){
   if(!user||user.isAnonymous){
     app.innerHTML=`<div class="ltab"><button class="${ltab==='owner'?'on':''}" onclick="ltab='owner';landing()">🧑‍🍳 Hotel / Cafe login</button><button class="${ltab==='res'?'on':''}" onclick="ltab='res';landing()">👑 Reseller login</button></div><div id="lf"></div>`;
     const keep=app.innerHTML;loginForm(ltab==='owner'?'Hotel / Cafe owner login':'Reseller login',ltab==='owner'?'Jo email aur password aapko diya gaya hai usse login karo. Orders, menu, QR sab yahin milega.':'Sirf reseller (admin) ke liye. Yahan se naye cafe banao.');
-    app.innerHTML=keep.replace('<div id="lf"></div>',app.innerHTML);return}
+    app.innerHTML=keep.replace('<div id="lf"></div>',app.innerHTML)+'<div class="ib" style="text-align:center;margin-top:8px"></div>';fillIB();return}
   if(roleState===''){roleState='checking';detectRole().then(route)}
   if(roleState==='checking')return void(app.innerHTML='<div class="card mut">Checking…</div>');
   if(roleState==='admin')return superPanel();
@@ -330,7 +348,7 @@ function admin(){
   }
   const live=orders.filter(o=>o.status!=='done').sort((a,b)=>a.ts-b.ts),hist=orders.filter(o=>o.status==='done').sort((a,b)=>b.ts-a.ts);
   const sndOn=AC&&AC.state==='running';
-  app.innerHTML=`<div class="tabs noprint"><button class="${tab==='orders'?'on':''}" onclick="tab='orders';admin()">🔔 Live (${live.length+calls.length})</button><button class="${tab==='hist'?'on':''}" onclick="tab='hist';admin()">🧾 History</button><button class="${tab==='offers'?'on':''}" onclick="tab='offers';admin()">📣 Offers</button><button class="${tab==='menu'?'on':''}" onclick="tab='menu';admin()">🍽 Menu</button><button class="${tab==='qr'?'on':''}" onclick="tab='qr';admin()">🔳 QR</button><button class="${tab==='setup'?'on':''}" onclick="tab='setup';admin()">⚙ Setup</button>${sndOn?'':'<button id="snd" class="r" onclick="unlockAudio()">🔕 Sound ON karo</button>'}${base?'<button class="o" onclick="logout()">Logout</button>':''}</div><div id="v"></div>`;
+  app.innerHTML=`<div class="tabs noprint"><button class="${tab==='orders'?'on':''}" onclick="tab='orders';admin()">🔔 Live (${live.length+calls.length})</button><button class="${tab==='hist'?'on':''}" onclick="tab='hist';admin()">🧾 History</button><button class="${tab==='offers'?'on':''}" onclick="tab='offers';admin()">📣 Offers</button><button class="${tab==='menu'?'on':''}" onclick="tab='menu';admin()">🍽 Menu</button><button class="${tab==='qr'?'on':''}" onclick="tab='qr';admin()">🔳 QR</button><button class="${tab==='setup'?'on':''}" onclick="tab='setup';admin()">⚙ Setup</button>${sndOn?'':'<button id="snd" class="r" onclick="unlockAudio()">🔕 Sound ON karo</button>'}${base?'<button class="o" onclick="logout()">Logout</button>':''}<span class="ib"></span></div><div id="v"></div>`;fillIB();
   const v=$('#v');
   if(tab==='orders'){
     const cs=calls.slice().sort((a,b)=>a.ts-b.ts).map(c=>`<div class="card alert"><span><b>${callTxt(c)} · Table ${c.table}</b> <span class="mut">${ago(c.ts)}${c.type==='paid'?' · UPI app mein paisa aaya check karo':''}</span></span><button onclick="delCall('${c.k}')">✓ Ho gaya</button></div>`).join('');
@@ -352,7 +370,7 @@ async function closeTable(ids){const a=ids.split(',').map(id=>orders.find(o=>o.i
 function kot(id){const o=orders.find(z=>z.id===id);if(!o)return;const m=document.createElement('div');m.className='modal';
   m.innerHTML=`<div><div class="inv"><div style="text-align:center;font-weight:700">KOT · Kitchen</div><div style="font-size:26px;font-weight:800;text-align:center">TABLE ${o.table}</div><div style="font-size:13px;text-align:center">${new Date(o.ts).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})} · #${esc(o.id.slice(-5).toUpperCase())}</div><hr><table>${o.items.map(i=>`<tr><td style="font-size:20px"><b>${i.q} ×</b> ${esc(i.n)}</td></tr>`).join('')}</table>${o.note?`<hr><div style="font-size:18px">📝 ${esc(o.note)}</div>`:''}<hr></div>
 <div class="noprint row" style="justify-content:center"><button onclick="printInv()">🖨 Print KOT</button><button class="o" style="background:#fff" onclick="this.closest('.modal').remove()">Close</button></div></div>`;document.body.appendChild(m)}
-const pchk=i=>{const m=MENU.find(z=>z.n===i.n);return !m?' <b style="color:#b3261e">⚠ menu mein nahi</b>':m.p!==i.p?` <b style="color:#b3261e">⚠ rate ${rs(i.p)} (menu ${rs(m.p)})</b>`:''};
+const pchk=i=>{const m=MENU.find(z=>z.n===(i.b||i.n));return !m?' <b style="color:#b3261e">⚠ menu mein nahi</b>':!i.b&&m.p!==i.p?` <b style="color:#b3261e">⚠ rate ${rs(i.p)} (menu ${rs(m.p)})</b>`:''};
 function card(o){const x=tot(o),liveO=o.status!=='done';
   return`<div class="card"><div style="display:flex;justify-content:space-between;align-items:center"><b style="font-size:20px">Table ${o.table}</b><span class="tag ${o.cx?'cx':o.status}">${label(o)}</span></div>
 <div class="mut">${new Date(o.ts).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})} (${ago(o.ts)}) · ${esc(o.name||'Customer')} · ${o.phone?'📱 '+o.phone:'no WhatsApp'}${o.pts?' · 🎁 '+o.pts+' pts':''}${o.rating?' · '+'★'.repeat(o.rating):''}</div>
@@ -377,6 +395,12 @@ const autoEm=(n,c)=>{const t=(n+' '+(c||'')).toLowerCase(),k=Object.keys(EMK).fi
 const isNV=n=>/chicken|mutton|fish|prawn|egg|keema|meat|beef|pork|crab|lamb|non.?veg/i.test(n);
 const vnorm=v=>!/non|nv|egg|chicken|mutton|fish|prawn/i.test(v||'');
 let msT=null;
+const gTxt=g=>(g||[]).map(x=>x.t+(x.one?'':'+')+': '+x.o.map(o=>o.n+' '+o.p).join(', ')).join('\n');
+function gParse(t){return t.split('\n').map(l=>l.trim()).filter(Boolean).map((l,li)=>{const c=l.indexOf(':');if(c<1)throw new Error('Line '+(li+1)+': group ka naam aur ":" chahiye, jaise  Size: Half 0, Full 80');
+  let name=l.slice(0,c).trim();const one=!/\+$/.test(name);name=name.replace(/\+$/,'').trim().slice(0,30);
+  const o=l.slice(c+1).split(',').map(x=>x.trim()).filter(Boolean).map(x=>{const mm=x.match(/^(.*?)\s+(?:\+|₹|rs\.?)?\s*(\d+(?:\.\d+)?)\s*$/i);return mm&&mm[1].trim()?{n:mm[1].trim().slice(0,40),p:+mm[2]}:{n:x.slice(0,40),p:0}});
+  if(!o.length)throw new Error('Line '+(li+1)+': koi option nahi');return{t:name,one,o:o.slice(0,20)}}).slice(0,6)}
+function gAdd(x){const t=$('#eg');t.value=(t.value.trim()?t.value.trim()+'\n':'')+x;t.focus()}
 function mSave(msg){clearTimeout(msT);msT=setTimeout(async()=>{try{await saveMenu();toast(msg||'Saved ✅',1500)}catch(e){alert('Save nahi hua: '+(e.code||e.message))}},250)}
 function menuEd(v){
   const cats=[...new Set(MENU.map(m=>m.c))];if(!lastCat)lastCat=cats[0]||'';
@@ -405,10 +429,16 @@ function drawML(){const el=$('#ml2');if(!el)return;const ql=mq.trim().toLowerCas
   MENU.forEach((m,i)=>{if(!ql||m.n.toLowerCase().includes(ql))(g[m.c]=g[m.c]||[]).push(i)});
   el.innerHTML=Object.keys(g).length?Object.entries(g).map(([c,a])=>`<h3 class="ch">${esc(c)} <span class="mut">(${a.length})</span> <a href="#" class="mut" style="font-size:12px" onclick="renCat(${JSON.stringify(c).replace(/"/g,'&quot;')});return false">✏ naam badlo</a></h3>${a.map(i=>i===medit?editRow(i):itemRow(i)).join('')}`).join(''):'<div class="card mut">Koi dish nahi. Upar se add karo.</div>';
   const f=$('#en');if(f)f.focus()}
-function itemRow(i){const m=MENU[i];return`<div class="card mi ${m.o?'oos':''}"><span class="em">${esc(m.e)}</span><div style="flex:1;min-width:0"><div class="n">${vdot(m.v)} ${esc(m.n)}</div><div class="mut">${rs(m.p)}</div></div><button class="st ${m.o?'off':'on'}" onclick="mAvail(${i})">${m.o?'❌ Khatam':'✅ Hai'}</button><button class="o" title="Edit" onclick="medit=${i};drawML()">✏</button><button class="o" title="Delete" onclick="mDel(${i})">🗑</button></div>`}
-function editRow(i){const m=MENU[i];return`<div class="card" style="border:2px solid var(--ac)"><div class="mrow"><input id="ee" style="width:56px" value="${esc(m.e)}"><input id="en" style="flex:2;min-width:140px" value="${esc(m.n)}" placeholder="Dish"><input id="ep" style="width:90px" inputmode="numeric" value="${m.p}" placeholder="₹"></div><div class="mrow"><input id="ec" style="flex:1;min-width:130px" list="catl" value="${esc(m.c)}" placeholder="Category"><label><input type="checkbox" id="evg" ${m.v?'checked':''}>🟢 Veg</label></div><div class="row"><button onclick="mUpd(${i})">💾 Save</button><button class="o" onclick="medit=-1;drawML()">Cancel</button></div></div>`}
+function itemRow(i){const m=MENU[i];return`<div class="card mi ${m.o?'oos':''}"><span class="em">${esc(m.e)}</span><div style="flex:1;min-width:0"><div class="n">${vdot(m.v)} ${esc(m.n)}</div><div class="mut">${rs(m.p)}${m.g?' · ⚙ '+m.g.map(g=>esc(g.t)).join(', '):''}</div></div><button class="st ${m.o?'off':'on'}" onclick="mAvail(${i})">${m.o?'❌ Khatam':'✅ Hai'}</button><button class="o" title="Edit" onclick="medit=${i};drawML()">✏</button><button class="o" title="Delete" onclick="mDel(${i})">🗑</button></div>`}
+function editRow(i){const m=MENU[i];return`<div class="card" style="border:2px solid var(--ac)"><div class="mrow"><input id="ee" style="width:56px" value="${esc(m.e)}"><input id="en" style="flex:2;min-width:140px" value="${esc(m.n)}" placeholder="Dish"><input id="ep" style="width:90px" inputmode="numeric" value="${m.p}" placeholder="₹"></div><div class="mrow"><input id="ec" style="flex:1;min-width:130px" list="catl" value="${esc(m.c)}" placeholder="Category"><label><input type="checkbox" id="evg" ${m.v?'checked':''}>🟢 Veg</label></div>
+<div style="margin-top:8px"><b>⚙ Custom options</b> <span class="mut">(khud banao: size, add-ons, spice…)</span></div>
+<textarea id="eg" rows="3" placeholder="Size: Half 0, Full 80&#10;Add-ons+: Extra cheese 30, Butter 20">${esc(gTxt(m.g))}</textarea>
+<div class="mut">Har line ek group: <code>Naam: option rate, option rate</code>. Rate = base rate ke upar extra (0 = free). Naam ke baad <b>+</b> lagao to customer kai chun sakta hai, warna ek hi.</div>
+<div class="row"><button class="o" type="button" onclick="gAdd('Size: Half 0, Full ${Math.round(m.p*0.6)||80}')">+ Half/Full</button><button class="o" type="button" onclick="gAdd('Size: Small 0, Medium 40, Large 80')">+ S/M/L</button><button class="o" type="button" onclick="gAdd('Add-ons+: Extra cheese 30, Extra butter 20')">+ Add-ons</button><button class="o" type="button" onclick="gAdd('Spice: Kam teekha 0, Medium 0, Zyada teekha 0')">+ Spice</button></div>
+<div class="row"><button onclick="mUpd(${i})">💾 Save</button><button class="o" onclick="medit=-1;drawML()">Cancel</button></div></div>`}
 function mUpd(i){const n=$('#en').value.trim().slice(0,60),p=+$('#ep').value.replace(/[^\d.]/g,'');if(!n||!p)return alert('Naam aur rate dono chahiye');
-  Object.assign(MENU[i],{n,p,e:$('#ee').value.trim()||autoEm(n,$('#ec').value),c:$('#ec').value.trim().slice(0,30)||'Menu',v:$('#evg').checked});medit=-1;mSave();drawML()}
+  let g;try{g=gParse($('#eg').value)}catch(e){return alert(e.message)}
+  Object.assign(MENU[i],{n,p,e:$('#ee').value.trim()||autoEm(n,$('#ec').value),c:$('#ec').value.trim().slice(0,30)||'Menu',v:$('#evg').checked,g:g.length?g:undefined});medit=-1;mSave();drawML()}
 function mAvail(i){MENU[i].o=!MENU[i].o;mSave(MENU[i].o?'❌ '+MENU[i].n+' khatam dikhega':'✅ '+MENU[i].n+' wapas available');drawML()}
 function mDel(i){if(MENU.length<2)return alert('Kam se kam 1 dish chahiye');if(!confirm(MENU[i].n+' menu se hatayein?'))return;const n=MENU[i].n;MENU.splice(i,1);medit=-1;mSave('🗑 '+n+' hata di');drawML()}
 function renCat(c){const n=(prompt('"'+c+'" ka naya naam:',c)||'').trim().slice(0,30);if(!n||n===c)return;MENU.forEach(m=>{if(m.c===c)m.c=n});if(lastCat===c)lastCat=n;mSave('Category badal di ✅');menuEd($('#v'))}
@@ -466,7 +496,7 @@ async function superPanel(){
 <label class="mut">Menu</label><select id="rcp"><option value="">Sample menu (12 dishes)</option><option value="-">Khaali menu</option>${ids.map(k=>`<option value="${esc(k)}">Copy: ${esc(SL[k])}</option>`).join('')}</select>
 <button style="width:100%;margin-top:6px" id="mkb" onclick="mk()">✅ Cafe banao + owner login banao</button></div>
 <div class="card"><b>Aapke cafes (${ids.length})</b>${ids.map(k=>`<div style="border-top:1px solid var(--bd);padding:8px 0;margin-top:6px"><b>${esc(SL[k])}</b> <span class="mut">(${esc(k)})</span><div class="mut">Owner: ${esc(SO[k]||'—')}</div><div class="row"><a class="btn" href="${ROOT}?r=${k}#admin">🧑‍🍳 Dashboard</a><a class="btn o" target="_blank" href="${ROOT}?r=${k}#table1">👀 Menu</a><button class="o" onclick="ownLogin('${k}')">🔑 Login</button><button class="o" onclick="chOwner('${k}')">✉ Owner badlo</button><button class="r" onclick="delCafe('${k}')">🗑</button></div></div>`).join('')||'<p class="mut">Abhi koi nahi</p>'}</div>
-<button class="o" onclick="logout()">Logout</button>`;
+<div class="row"><button class="o" onclick="logout()">Logout</button><span class="ib"></span></div>`;fillIB();
   let touched=false;$('#rid').oninput=()=>touched=true;$('#rn').oninput=()=>{if(!touched)$('#rid').value=slug($('#rn').value)};
 }
 async function mk(){

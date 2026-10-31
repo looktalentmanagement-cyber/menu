@@ -79,3 +79,8 @@ Har restaurant ke liye database mein `restaurants/<id>/owner` = owner ka email (
 - Owner dashboard mein 🔳 QR tab: har table ka ⬇ Download (PNG), ⬇ Sab download, 🖨 Sab print.
 - Menu: upar quick add (naam, rate, category, veg), Enter se add, ✅ Hai / ❌ Khatam ek tap, ✏ edit, 🗑 delete, category rename, sab auto-save. Bulk paste bhi.
 - Rules deploy: `npx firebase-tools deploy --only database --project qr-menu-f5e9a` (firebase.json saath hai).
+
+## v3.1: App + custom options
+- PWA app: manifest.json, sw.js, icons. Owner main link Chrome mein khole → "📲 App install karo" (ya ⋮ → Install app). iPhone: Safari Share → Add to Home Screen. Play Store nahi chahiye.
+- Custom options (owner khud banata hai): Menu → dish ✏ → "⚙ Custom options". Har line ek group: `Size: Half 0, Full 80` (ek chuno), `Add-ons+: Extra cheese 30` (+ = kai chun sakte). Rate = base ke upar extra. Quick buttons: Half/Full, S/M/L, Add-ons, Spice.
+- Customer: options wali dish pe "+ Add" se chooser khulta hai, live price; order/KOT/bill mein "Paneer Tikka (Full, Extra cheese)" dikhta hai.
