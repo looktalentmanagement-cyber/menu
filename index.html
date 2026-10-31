@@ -121,6 +121,10 @@ let AC=null,flashT=null,wl=null;
 function unlockAudio(){try{AC=AC||new(window.AudioContext||window.webkitAudioContext)();AC.resume().then(()=>{const b=$('#snd');if(b)b.remove()});if(navigator.wakeLock&&!wl)navigator.wakeLock.request('screen').then(x=>wl=x).catch(()=>{})}catch(e){}}
 document.addEventListener('click',()=>{if(isAdmin())unlockAudio()});
 function beep(){if(!AC)return;try{[0,.3,.6].forEach((t,i)=>{const o=AC.createOscillator(),g=AC.createGain(),n=AC.currentTime+t;o.frequency.value=i%2?660:880;g.gain.setValueAtTime(.0001,n);g.gain.exponentialRampToValueAtTime(.5,n+.02);g.gain.exponentialRampToValueAtTime(.0001,n+.25);o.connect(g).connect(AC.destination);o.start(n);o.stop(n+.27)})}catch(e){}}
+function uiDlg(msg,mode,def){return new Promise(res=>{const m=document.createElement('div');m.className='modal dlg';m.style.zIndex=50;m.innerHTML=`<div class="sheet"><p style="white-space:pre-wrap;margin-top:0;font-size:16px">${esc(msg)}</p>${mode==='p'?'<input id="dlgi" autocapitalize="off" autocomplete="off" autocorrect="off" spellcheck="false">':''}<div class="row"><button id="dlgok">OK</button>${mode!=='a'?'<button class="o" id="dlgno">Cancel</button>':''}</div></div>`;document.body.appendChild(m);const i=m.querySelector('#dlgi');if(i){i.value=def==null?'':def;setTimeout(()=>{i.focus();i.select()},50)}const end=v=>{m.remove();res(v)};m.querySelector('#dlgok').onclick=()=>end(mode==='p'?i.value:true);const no=m.querySelector('#dlgno');if(no)no.onclick=()=>end(mode==='p'?null:false);if(i)i.onkeydown=e=>{if(e.key==='Enter')end(i.value)}})}
+function cfm(m){return uiDlg(m,'c')}
+function ask(m,d){return uiDlg(m,'p',d)}
+window.alert=m=>{uiDlg(String(m),'a')};
 function toast(m,ms){const t=$('#toast');t.textContent=m;t.style.display='block';clearTimeout(t._h);t._h=setTimeout(()=>t.style.display='none',ms||4000)}
 function flash(){if(flashT)return;let on=0;const orig=document.title;flashT=setInterval(()=>{document.title=(on^=1)?'🔔 NAYA ORDER':orig},800);const stop=()=>{clearInterval(flashT);flashT=null;document.title=orig;removeEventListener('focus',stop)};addEventListener('focus',stop);setTimeout(stop,30000)}
 function adminTick(){
@@ -198,7 +202,7 @@ function home(){app.innerHTML=`<div class="card"><h2>${esc(CFG.name)}</h2><p cla
 <p><a class="btn" href="#admin">🧑‍🍳 Restaurant dashboard</a> <a class="btn o" href="#qr">🔳 Table QR codes</a> <a class="btn o" href="#table1">👀 Customer view</a></p>
 ${base?'':'<p class="mut">Demo: open <a href="#table5">Table 5</a>, place an order, then check the dashboard in another tab.</p>'}</div>`}
 const qurl=i=>ROOT+'?r='+R+'#table'+i;
-function cpLink(i){const u=qurl(i);const ok=()=>toast('🔗 Table '+i+' ka link copy ho gaya',2000);if(navigator.clipboard&&window.isSecureContext)navigator.clipboard.writeText(u).then(ok,()=>prompt('Link copy karo:',u));else prompt('Link copy karo:',u)}
+function cpLink(i){const u=qurl(i);const ok=()=>toast('🔗 Table '+i+' ka link copy ho gaya',2000);if(navigator.clipboard&&window.isSecureContext)navigator.clipboard.writeText(u).then(ok,()=>ask('Link copy karo:',u));else ask('Link copy karo:',u)}
 function qrTab(v){const n=+CFG.tables||20;
   v.innerHTML=`<div class="card noprint"><b>🔳 Table QR codes (${n} tables)</b><div class="mut">Har table pe uska QR lagao. Tables ki ginti ⚙ Setup mein badlo.</div><div class="row"><button onclick="printQR()">🖨 Sab print karo</button><button class="o" onclick="dlAll()">⬇ Sab download (PNG)</button></div></div><div class="qrs" id="qrs"></div>`;
   const box=$('#qrs');
@@ -364,9 +368,10 @@ function admin(){
 }
 function tableCard(t,a){const sum=a.reduce((s,o)=>s+tot(o).t,0),ids=a.map(o=>o.id).join(',');
   return`<div style="border:2px solid var(--ac);border-radius:16px;padding:8px;margin-bottom:14px"><div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px;padding:4px 4px 8px"><b style="font-size:22px">🍽 Table ${t}</b><span style="font-size:18px">Total <b>${rs(sum)}</b> <span class="mut">(${a.length} order)</span></span></div>${a.map(o=>card(o)).join('')}<div class="row noprint" style="padding:0 4px 4px"><button class="o" onclick="invoice('${ids}')">🧾 Table bill</button><button class="r" onclick="closeTable('${ids}')">💰 Paid &amp; close table</button></div></div>`}
+async function cancelO(id){if(await cfm('Order cancel karein?'))updOrder(id,{status:'done',cx:true})}
 async function closeTable(ids){const a=ids.split(',').map(id=>orders.find(o=>o.id===id)).filter(Boolean);if(!a.length)return;const t=a[0].table;
-  if(a.some(o=>o.status==='new')&&!confirm('Kuch order abhi accept nahi hue. Phir bhi Table '+t+' close karein?'))return;
-  if(!confirm('Table '+t+' ka '+rs(a.reduce((s,o)=>s+tot(o).t,0))+' mil gaya? Close karein?'))return;
+  if(a.some(o=>o.status==='new')&&!(await cfm('Kuch order abhi accept nahi hue. Phir bhi Table '+t+' close karein?')))return;
+  if(!(await cfm('Table '+t+' ka '+rs(a.reduce((s,o)=>s+tot(o).t,0))+' mil gaya? Close karein?')))return;
   const tc=calls.filter(c=>c.table===t&&(c.type==='bill'||c.type==='paid'));
   if(base){const up={};a.forEach(o=>up['orders/'+o.id+'/status']='done');tc.forEach(c=>up['calls/'+c.k]=null);try{await base.update(up);toast('Table '+t+' close ✅')}catch(e){alert('Save nahi hua: '+(e.code||e.message))}}
   else{for(const o of a)await updOrder(o.id,{status:'done'});lsSet(LSC,lsGet(LSC).filter(c=>!tc.some(x=>x.k===c.k)));calls=lsGet(LSC);admin()}}
@@ -379,7 +384,7 @@ function card(o){const x=tot(o),liveO=o.status!=='done';
 <div class="mut">${new Date(o.ts).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})} (${ago(o.ts)}) · ${esc(o.name||'Customer')} · ${o.phone?'📱 '+o.phone:'no WhatsApp'}${o.pts?' · 🎁 '+o.pts+' pts':''}${o.rating?' · '+'★'.repeat(o.rating):''}</div>
 <ul style="margin:8px 0;padding-left:18px">${o.items.map(i=>`<li>${i.q}× ${esc(i.n)}${liveO?pchk(i):''}</li>`).join('')}</ul>${o.note?`<div class="note">📝 ${esc(o.note)}</div>`:''}
 <div style="margin-top:6px"><b>Amount: ${rs(x.t)}</b> <span class="mut">(incl. ${x.gp}% GST)</span></div>
-<div class="row noprint">${o.status==='new'?`<button onclick="updOrder('${o.id}',{status:'prep'})">✅ Accept</button><button class="o" onclick="if(confirm('Order cancel karein?'))updOrder('${o.id}',{status:'done',cx:true})">❌ Cancel</button>`:''}${o.status==='prep'?`<button onclick="updOrder('${o.id}',{status:'ready'})">🍽 Ready / Served</button>`:''}${liveO?`<button class="o" onclick="kot('${o.id}')">🖨 KOT</button>`:''}
+<div class="row noprint">${o.status==='new'?`<button onclick="updOrder('${o.id}',{status:'prep'})">✅ Accept</button><button class="o" onclick="cancelO('${o.id}')">❌ Cancel</button>`:''}${o.status==='prep'?`<button onclick="updOrder('${o.id}',{status:'ready'})">🍽 Ready / Served</button>`:''}${liveO?`<button class="o" onclick="kot('${o.id}')">🖨 KOT</button>`:''}
 ${o.cx||liveO?'':`<button class="o" onclick="invoice('${o.id}')">🧾 Invoice</button>`}${o.phone&&!o.pts&&!o.cx?`<button class="o" onclick="updOrder('${o.id}',{pts:Math.floor(${x.t}/10)})">🎁 Points</button>`:''}</div></div>`}
 async function offersTab(v){
   if(!offerTxt)offerTxt=`🎉 ${CFG.name} offer: agli visit pe 15% off! Ye message counter pe dikhao. Is hafte valid.`;
@@ -420,9 +425,9 @@ function menuEd(v){
   const an=$('#an'),ap=$('#ap'),ac=$('#ac'),av=$('#av');
   const setV=x=>{newV=x;av.className='st '+(x?'on':'off');av.textContent=x?'🟢 Veg':'🔴 Non-veg'};
   av.onclick=()=>setV(!newV);an.oninput=()=>{if(isNV(an.value))setV(false)};
-  const add=()=>{const n=an.value.trim().slice(0,60),p=+ap.value.replace(/[^\d.]/g,''),c=ac.value.trim().slice(0,30)||'Menu';
+  const add=async()=>{const n=an.value.trim().slice(0,60),p=+ap.value.replace(/[^\d.]/g,''),c=ac.value.trim().slice(0,30)||'Menu';
     if(!n){an.focus();return alert('Dish ka naam likho')}if(!p){ap.focus();return alert('Rate likho')}
-    if(MENU.some(m=>m.n.toLowerCase()===n.toLowerCase())&&!confirm(n+' pehle se menu mein hai. Phir bhi add karein?'))return;
+    if(MENU.some(m=>m.n.toLowerCase()===n.toLowerCase())&&!(await cfm(n+' pehle se menu mein hai. Phir bhi add karein?')))return;
     MENU.push({n,p,e:autoEm(n,c),c,v:newV,o:false});lastCat=c;mSave('✅ '+n+' add ho gayi');an.value='';ap.value='';setV(true);
     if(![...$('#catl').options].some(o=>o.value===c))$('#catl').insertAdjacentHTML('beforeend',`<option value="${esc(c)}">`);drawML();an.focus()};
   $('#ab').onclick=add;ap.onkeydown=e=>{if(e.key==='Enter')add()};an.onkeydown=e=>{if(e.key==='Enter')ap.focus()};ac.onkeydown=e=>{if(e.key==='Enter')add()};
@@ -444,14 +449,14 @@ function mUpd(i){const n=$('#en').value.trim().slice(0,60),p=+$('#ep').value.rep
   let g;try{g=gParse($('#eg').value)}catch(e){return alert(e.message)}
   Object.assign(MENU[i],{n,p,e:$('#ee').value.trim()||autoEm(n,$('#ec').value),c:$('#ec').value.trim().slice(0,30)||'Menu',v:$('#evg').checked,g:g.length?g:undefined});medit=-1;mSave();drawML()}
 function mAvail(i){MENU[i].o=!MENU[i].o;mSave(MENU[i].o?'❌ '+MENU[i].n+' khatam dikhega':'✅ '+MENU[i].n+' wapas available');drawML()}
-function mDel(i){if(MENU.length<2)return alert('Kam se kam 1 dish chahiye');if(!confirm(MENU[i].n+' menu se hatayein?'))return;const n=MENU[i].n;MENU.splice(i,1);medit=-1;mSave('🗑 '+n+' hata di');drawML()}
-function renCat(c){const n=(prompt('"'+c+'" ka naya naam:',c)||'').trim().slice(0,30);if(!n||n===c)return;MENU.forEach(m=>{if(m.c===c)m.c=n});if(lastCat===c)lastCat=n;mSave('Category badal di ✅');menuEd($('#v'))}
-function bulk(rep){
+async function mDel(i){if(MENU.length<2)return alert('Kam se kam 1 dish chahiye');if(!(await cfm(MENU[i].n+' menu se hatayein?')))return;const n=MENU[i].n;MENU.splice(i,1);medit=-1;mSave('🗑 '+n+' hata di');drawML()}
+async function renCat(c){const n=((await ask('"'+c+'" ka naya naam:',c))||'').trim().slice(0,30);if(!n||n===c)return;MENU.forEach(m=>{if(m.c===c)m.c=n});if(lastCat===c)lastCat=n;mSave('Category badal di ✅');menuEd($('#v'))}
+async function bulk(rep){
   const rows=$('#bk').value.split('\n').map(l=>l.split(/[,\t|]/).map(x=>x.trim())).filter(a=>a[0]),bad=[];
   const a=rows.map(([n,p,c,v],i)=>{const pr=+String(p||'').replace(/rs\.?|inr/ig,'').replace(/[^\d.]/g,'');if(!pr)bad.push(i+1);const cc=(c||'Menu').slice(0,30);return{n:n.slice(0,60),p:pr||0,e:autoEm(n,cc),c:cc,v:vnorm(v)&&!isNV(n),o:false}});
   if(!a.length)return alert('Pehle list paste karo');
-  if(bad.length&&!confirm('Line '+bad.join(', ')+' mein rate nahi mila (₹0 lagega). Phir bhi aage badhein?'))return;
-  if(rep&&!confirm('Poora purana menu hata ke '+a.length+' dishes daalein?'))return;
+  if(bad.length&&!(await cfm('Line '+bad.join(', ')+' mein rate nahi mila (₹0 lagega). Phir bhi aage badhein?')))return;
+  if(rep&&!(await cfm('Poora purana menu hata ke '+a.length+' dishes daalein?')))return;
   MENU=rep?a:MENU.concat(a);mq='';medit=-1;mSave(a.length+' dishes save ho gayi ✅');menuEd($('#v'))}
 function setupEd(v){v.innerHTML=`<div class="card"><label class="mut">Restaurant name</label><input id="sn" value="${esc(CFG.name)}"><label class="mut">Tagline (e.g. Pure Veg, Family Restaurant)</label><input id="st2" value="${esc(CFG.tag)}"><label class="mut">Brand color</label><input id="sc" type="color" value="${esc(CFG.color)}" style="height:44px"><label class="mut">GST % (0 = no GST)</label><input id="sg" inputmode="numeric" value="${CFG.gst}"><label class="mut">UPI ID (customer table se pay karega, e.g. cafe@okhdfc)</label><input id="su" value="${esc(CFG.upi||'')}"><label class="mut">Restaurant ka WhatsApp number (customer isi pe "bill bhejo" message karega)</label><input id="swa" inputmode="numeric" maxlength="13" placeholder="98XXXXXXXX" value="${esc(CFG.wa||'')}"><label class="mut">Google review link (Google Business Profile → "Ask for reviews" → copy link)</label><input id="sgr" placeholder="https://g.page/r/.../review" value="${esc(CFG.grev||'')}"><label class="mut">Kitne tables?</label><input id="stb" inputmode="numeric" value="${CFG.tables||20}"><button style="margin-top:8px" onclick="saveS()">💾 Save</button></div>`}
 async function saveS(){CFG.name=$('#sn').value.trim()||CFG.name;CFG.tag=$('#st2').value.trim();CFG.color=$('#sc').value;CFG.gst=+$('#sg').value||0;CFG.upi=$('#su').value.trim();const wa=$('#swa').value.replace(/\D/g,'').slice(-10);if(wa&&!/^[6-9]\d{9}$/.test(wa)){alert('Sahi 10-digit WhatsApp number daalo');return}CFG.wa=wa;const gr=$('#sgr').value.trim();if(gr&&!/^https:\/\//.test(gr)){alert('Google review link https:// se shuru hona chahiye');return}CFG.grev=gr;CFG.tables=Math.min(200,Math.max(1,+$('#stb').value||20));await saveCfg();toast('Saved ✅');tab='orders';admin()}
@@ -514,20 +519,20 @@ async function mk(){
     if(cp==='-')menu=JSON.stringify([{n:'Masala Chai',p:30,e:'☕',c:'Drinks',v:true,o:false}]);
     else if(cp){const v=(await fdb.ref('restaurants/'+cp+'/menu').once('value')).val();if(v&&JSON.parse(v).length)menu=v}
     const st=await mkOwner(email,pw);
-    if(st==='exists'&&!confirm(email+' ka login pehle se bana hua hai. Owner apna purana password use karega.\n\n⚠ Agar ye account owner ne khud nahi banaya, to Cancel karke dusra email do. Aage badhein?')){done();return}
+    if(st==='exists'&&!(await cfm(email+' ka login pehle se bana hua hai. Owner apna purana password use karega.\n\n⚠ Agar ye account owner ne khud nahi banaya, to Cancel karke dusra email do. Aage badhein?'))){done();return}
     const up={};up['restaurants/'+id+'/config']={name,tag:'',color:'#2e8b3d',gst:5,offer:'',upi:'',tables:20,wa:'',grev:''};up['restaurants/'+id+'/menu']=menu;up['restaurants/'+id+'/owner']=email;if(st==='new')up['restaurants/'+id+'/ownerUid']=NEWUID;up['index/'+id]=name;up['owners/'+ekey(email)+'/'+id]=name;
     await fdb.ref().update(up);done();await superPanel();shareLogin(name,email,pw,st==='exists');
   }catch(e){done();authErr(e)}
 }
 async function ownLogin(k){const email=SO[k];if(!email)return alert('Pehle owner email set karo (✉ Owner badlo)');
-  const pw=prompt('Naya login banane ke liye '+email+' ka password likho (6+ characters).\nAgar account pehle se hai to reset link email pe jayega.','');if(pw==null)return;
+  const pw=await ask('Naya login banane ke liye '+email+' ka password likho (6+ characters).\nAgar account pehle se hai to reset link email pe jayega.','');if(pw==null)return;
   try{if(pw.length>=6){const st=await mkOwner(email,pw);if(st==='new'){await fdb.ref('restaurants/'+k+'/ownerUid').set(NEWUID);return shareLogin(SL[k],email,pw,false)}}
-    if(confirm(email+' ka account pehle se hai. Password reset link us email pe bhejein?')){await firebase.auth().sendPasswordResetEmail(email);alert('Reset link bhej diya. Owner apna email check kare (Spam bhi).')}
+    if(await cfm(email+' ka account pehle se hai. Password reset link us email pe bhejein?')){await firebase.auth().sendPasswordResetEmail(email);alert('Reset link bhej diya. Owner apna email check kare (Spam bhi).')}
   }catch(e){authErr(e)}}
-async function chOwner(k){const old=SO[k]||'',e=(prompt('Naya owner email:',old)||'').trim().toLowerCase();if(!e||e===old)return;if(!/^\S+@\S+\.\S+$/.test(e))return alert('Email sahi nahi hai');
+async function chOwner(k){const old=SO[k]||'',e=((await ask('Naya owner email:',old))||'').trim().toLowerCase();if(!e||e===old)return;if(!/^\S+@\S+\.\S+$/.test(e))return alert('Email sahi nahi hai');
   const up={};up['restaurants/'+k+'/owner']=e;up['restaurants/'+k+'/ownerUid']=null;up['owners/'+ekey(e)+'/'+k]=SL[k];if(old)up['owners/'+ekey(old)+'/'+k]=null;
-  try{await fdb.ref().update(up);await superPanel();if(confirm('Owner badal gaya ✅ Ab '+e+' ka login banayein?'))ownLogin(k)}catch(x){alert('Error: '+(x.code||x.message))}}
-async function delCafe(k){if((prompt('Pakka delete? Saare orders aur menu hamesha ke liye chale jayenge.\nConfirm ke liye short-id likho: '+k)||'').trim().toLowerCase()!==k.toLowerCase())return;
+  try{await fdb.ref().update(up);await superPanel();if(await cfm('Owner badal gaya ✅ Ab '+e+' ka login banayein?'))ownLogin(k)}catch(x){alert('Error: '+(x.code||x.message))}}
+async function delCafe(k){if(((await ask('Pakka delete? Saare orders aur menu hamesha ke liye chale jayenge.\nConfirm ke liye short-id likho: '+k))||'').trim().toLowerCase()!==k.toLowerCase())return;
   const up={};up['restaurants/'+k]=null;up['index/'+k]=null;if(SO[k])up['owners/'+ekey(SO[k])+'/'+k]=null;
   try{await fdb.ref().update(up);toast('Delete ho gaya');superPanel()}catch(e){alert('Error: '+(e.code||e.message))}}
 init();
