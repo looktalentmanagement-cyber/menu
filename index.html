@@ -35,7 +35,12 @@ input[type=checkbox]{width:auto;margin:0 6px 0 0}
 .note{background:#fff3cd;color:#5c4400;border-radius:8px;padding:6px 8px;margin-top:6px;font-size:14px}
 #toast{position:fixed;top:64px;left:50%;transform:translateX(-50%);background:#222;color:#fff;padding:12px 18px;border-radius:12px;z-index:20;white-space:pre-line;font-weight:600;box-shadow:0 6px 20px rgba(0,0,0,.3);display:none;max-width:90vw}
 .row{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}.mrow{display:flex;gap:6px;flex-wrap:wrap;align-items:center}.mrow label{font-size:13px;display:flex;align-items:center}
-@media print{body *{visibility:hidden}.inv,.inv *{visibility:visible}.inv{position:absolute;left:0;top:0;max-height:none}.noprint{display:none!important}}
+@media print{.noprint,header,#toast{display:none!important}body.pinv *{visibility:hidden}body.pinv .inv,body.pinv .inv *{visibility:visible}body.pinv .inv{position:absolute;left:0;top:0;max-height:none}
+body.pqr .wrap{max-width:none;padding:0}body.pqr .qrs{grid-template-columns:repeat(3,1fr);gap:8px}body.pqr .qrc{break-inside:avoid;border:1.5px dashed #888;background:#fff;color:#000}}
+.mi{display:flex;gap:8px;align-items:center;margin-bottom:6px;padding:8px 10px}.mi .em{font-size:26px}.mi button{padding:6px 10px}
+.st{border:0;border-radius:99px;padding:6px 10px;font-size:13px}.st.on{background:#1a8f2e}.st.off{background:#b3261e}
+.ltab{display:flex;gap:6px;margin-bottom:10px}.ltab button{flex:1;background:transparent;color:var(--tx);border:1.5px solid var(--bd);padding:12px}.ltab button.on{background:var(--ac);color:#fff;border-color:var(--ac)}
+details summary{cursor:pointer}select{width:100%;padding:10px;border:1px solid var(--bd);border-radius:10px;background:var(--card);color:var(--tx);font:inherit;margin:4px 0}
 </style></head><body>
 <header><b id="hn">Restaurant</b><span id="hr" style="color:#e6f4e8;font-size:13px"></span></header>
 <div class="wrap" id="app"></div><div id="toast"></div>
@@ -53,9 +58,13 @@ const norm=m=>Array.isArray(m)?{n:m[0],p:+m[1]||0,e:m[2]||'🍽',c:'Menu',v:true
 let MENU=DEF.slice();
 
 const $=s=>document.querySelector(s),app=$('#app'),esc=s=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const HASR=new URLSearchParams(location.search).has('r');
 const R=(new URLSearchParams(location.search).get('r')||'demo').toLowerCase().replace(/[^a-z0-9-]/g,'');
-let CFG={name:'Demo Restaurant',tag:'',color:'#2e8b3d',gst:5,offer:'',upi:'',tables:20,wa:'',grev:''},cfgState='loading';
+const ROOT=location.origin+location.pathname;
+const ekey=e=>String(e||'').toLowerCase().replace(/\./g,',');
+let CFG={name:HASR?'Restaurant':'QR Menu',tag:'',color:'#2e8b3d',gst:5,offer:'',upi:'',tables:20,wa:'',grev:''},cfgState='loading';
 const BASE=location.href.split('#')[0];
+let roleState='',myCafes={},ltab='owner',medit=-1,mq='',newV=true,lastCat='';
 let GST=5,orders=[],calls=[],cart={},fdb=null,base=null,user=null,online=true,ownerState='',seen=null,seenC=null;
 let showMenu=false,cat='All',q='',tab='orders',offerTxt='';
 const SV=()=>firebase.database.ServerValue.TIMESTAMP;
@@ -113,25 +122,25 @@ function adminTick(){
       toast(fo.map(o=>'🔔 Naya order · Table '+o.table).concat(fc.map(c=>callTxt(c)+' · Table '+c.table)).join('\n'),8000)}
   }
   seen=new Set(orders.map(o=>o.id));seenC=new Set(calls.map(c=>c.k));
-  if(isAdmin()&&tab!=='menu'&&tab!=='setup'&&!$('.modal'))admin();
+  if(isAdmin()&&tab!=='menu'&&tab!=='setup'&&tab!=='qr'&&!$('.modal'))admin();
 }
 setInterval(()=>{if(isAdmin()&&tab==='orders'&&!$('.modal'))admin()},60000);
 
 // ---------- init & listeners ----------
 let offs=[],mode='';
 function listen(q,cb){q.on('value',cb,e=>console.warn(e));offs.push(()=>q.off('value',cb))}
-function busy(){return(/^#table/.test(location.hash)&&(Object.keys(cart).some(k=>cart[k])||$('.modal')))||(isAdmin()&&(tab==='menu'||tab==='setup'))}
+function busy(){return(/^#table/.test(location.hash)&&(Object.keys(cart).some(k=>cart[k])||$('.modal')))||(isAdmin()&&(tab==='menu'||tab==='setup'||tab==='qr'))}
 function soft(){if(!busy())route()}
 async function attach(){
   if(!base)return;
-  const h=location.hash,want=/^#table\d+$/.test(h)?'cust':(h==='#admin'?'admin':'');
-  const key=want+':'+(user?user.uid+(user.emailVerified?'v':''):'');
+  const h=location.hash,want=/^#table\d+$/.test(h)?'cust':(h==='#admin'&&HASR?'admin':'');
+  const key=want+':'+(user?user.uid:'');
   if(key===mode)return;mode=key;offs.forEach(f=>f());offs=[];orders=[];calls=[];seen=null;seenC=null;ownerState='';
   if(want==='cust'){
     if(!user){try{await firebase.auth().signInAnonymously()}catch(e){app.innerHTML='<div class="card">Connect nahi ho paya. Page reload karo.</div>'}return}
     listen(base.child('orders').orderByChild('uid').equalTo(user.uid),s=>{orders=Object.values(s.val()||{});soft()});
   }
-  if(want==='admin'&&user&&!user.isAnonymous&&user.emailVerified){
+  if(want==='admin'&&user&&!user.isAnonymous){
     ownerState='checking';route();
     try{await base.child('owner').once('value');ownerState='ok'}catch(e){ownerState='no';route();return}
     // only recent orders are synced (fast + stays inside free plan limits)
@@ -146,14 +155,14 @@ function init(){
     fdb.ref('.info/connected').on('value',s=>{online=s.val()===true;hdr()});
     base.child('config').on('value',s=>{const v=s.val();if(v){CFG=Object.assign(CFG,v);cfgState='ok'}else cfgState='none';brand();soft()});
     base.child('menu').on('value',s=>{try{const v=JSON.parse(s.val());if(v&&v.length)MENU=v.map(norm)}catch(e){}if(/^#table/.test(location.hash)&&$('#ml'))listMenu();else soft()});
-    firebase.auth().onAuthStateChanged(u=>{user=u;attach();route()});
+    firebase.auth().onAuthStateChanged(u=>{user=u;roleState='';attach();route()});
   }catch(e){console.error(e);base=null}}
   if(!base){const c=lc('cfg');if(c)CFG=Object.assign(CFG,c);const m=lc('menu');if(m)MENU=m.map(norm);cfgState='ok';
     orders=lsGet(LS);calls=lsGet(LSC);seen=new Set(orders.map(o=>o.id));seenC=new Set(calls.map(c=>c.k));
     addEventListener('storage',()=>{orders=lsGet(LS);calls=lsGet(LSC);if(isAdmin())adminTick();else soft()})}
   brand();hdr();route();
 }
-const isAdmin=()=>location.hash==='#admin';
+const isAdmin=()=>HASR&&location.hash==='#admin';
 const callTxt=c=>c.type==='bill'?'🧾 Bill chahiye':c.type==='paid'?'💳 Customer bola: pay kar diya'+(c.amt?' '+rs(c.amt):''):'🙋 Waiter bulaya';
 const H=3600000;
 const rs=n=>'₹'+n;
@@ -167,24 +176,35 @@ addEventListener('hashchange',()=>{attach();route()});
 function route(){
   const h=location.hash,m=h.match(/^#table(\d+)$/);
   if(h==='#super')return superPanel();
+  if(!HASR&&!m)return landing();
+  if(h==='#qr'){tab='qr';history.replaceState(null,'','#admin');return admin()}
   if(cfgState==='loading')return void(app.innerHTML='<div class="card mut">Loading…</div>');
   if(cfgState==='none')return void(app.innerHTML='<div class="card"><h3>Restaurant not found</h3><p class="mut">Link check karo.</p></div>');
   if(m&&+m[1]>=1&&+m[1]<=(+CFG.tables||20))return customer(+m[1]);
   if(h==='#admin')return admin();
-  if(h==='#qr')return qrPage();
   home();
 }
 function home(){app.innerHTML=`<div class="card"><h2>${esc(CFG.name)}</h2><p class="mut">Customers only see their own table link (from the QR code).</p>
-<p><a class="btn" href="#admin">🧑‍🍳 Restaurant dashboard</a> <a class="btn o" href="#qr">🔳 Table QR codes</a></p>
+<p><a class="btn" href="#admin">🧑‍🍳 Restaurant dashboard</a> <a class="btn o" href="#qr">🔳 Table QR codes</a> <a class="btn o" href="#table1">👀 Customer view</a></p>
 ${base?'':'<p class="mut">Demo: open <a href="#table5">Table 5</a>, place an order, then check the dashboard in another tab.</p>'}</div>`}
-function qrPage(){
-  const n=+CFG.tables||20;
-  app.innerHTML=`<div class="noprint" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px"><h2>Table QR codes</h2><span><a href="#admin" class="btn o">← Dashboard</a> <button onclick="print()">🖨 Print all</button></span></div>
-<p class="mut noprint">Har table pe uska QR lagao.</p><div class="qrs" id="qrs"></div>`;
+const qurl=i=>ROOT+'?r='+R+'#table'+i;
+function qrTab(v){const n=+CFG.tables||20;
+  v.innerHTML=`<div class="card noprint"><b>🔳 Table QR codes (${n} tables)</b><div class="mut">Har table pe uska QR lagao. Tables ki ginti ⚙ Setup mein badlo.</div><div class="row"><button onclick="printQR()">🖨 Sab print karo</button><button class="o" onclick="dlAll()">⬇ Sab download (PNG)</button></div></div><div class="qrs" id="qrs"></div>`;
   const box=$('#qrs');
-  for(let i=1;i<=n;i++){const d=document.createElement('div');d.className='card qrc';d.innerHTML=`<b>${esc(CFG.name)}</b><br><b>Table ${i}</b><div class="q"></div><span class="mut">Scan to order</span>`;box.appendChild(d);
-    try{new QRCode(d.querySelector('.q'),{text:BASE+'#table'+i,width:130,height:130,colorDark:'#000',colorLight:'#fff'})}catch(e){d.querySelector('.q').textContent='QR unavailable'}}
+  for(let i=1;i<=n;i++){const d=document.createElement('div');d.className='card qrc';d.innerHTML=`<b>${esc(CFG.name)}</b><br><b style="font-size:20px">Table ${i}</b><div class="q"></div><span class="mut">📱 Scan karke order karo</span><div class="noprint" style="margin-top:6px"><button class="o" style="padding:5px 10px" onclick="dlQR(${i})">⬇ Download</button></div>`;box.appendChild(d);
+    try{new QRCode(d.querySelector('.q'),{text:qurl(i),width:150,height:150,colorDark:'#000',colorLight:'#fff'})}catch(e){d.querySelector('.q').textContent='QR unavailable'}}
 }
+function qrPng(i){const t=document.createElement('div');new QRCode(t,{text:qurl(i),width:480,height:480,colorDark:'#000',colorLight:'#fff',correctLevel:QRCode.CorrectLevel.M});const q=t.querySelector('canvas');
+  const c=document.createElement('canvas');c.width=600;c.height=840;const x=c.getContext('2d'),F='system-ui,"Segoe UI",Roboto,sans-serif';
+  x.fillStyle='#fff';x.fillRect(0,0,600,840);x.fillStyle=CFG.color||'#2e8b3d';x.fillRect(0,0,600,120);x.textAlign='center';x.fillStyle='#fff';
+  let fs=46;do{x.font='bold '+fs+'px '+F;fs-=2}while(x.measureText(CFG.name).width>560&&fs>18);x.fillText(CFG.name,300,76);
+  x.fillStyle='#111';x.font='bold 60px '+F;x.fillText('Table '+i,300,200);if(q)x.drawImage(q,60,230,480,480);
+  x.fillStyle='#333';x.font='30px '+F;x.fillText('📱 Scan karke order karo',300,770);return c.toDataURL('image/png')}
+function dlQR(i){try{const a=document.createElement('a');a.href=qrPng(i);a.download=R+'-table-'+i+'.png';document.body.appendChild(a);a.click();a.remove()}catch(e){alert('Download nahi hua: '+e.message)}}
+async function dlAll(){const n=+CFG.tables||20;toast('⬇ '+n+' QR download ho rahe hain… browser "multiple downloads" puche to Allow dabao',6000);for(let i=1;i<=n;i++){dlQR(i);await new Promise(r=>setTimeout(r,400))}}
+function printQR(){document.body.classList.add('pqr');setTimeout(()=>print(),50)}
+function printInv(){document.body.classList.add('pinv');setTimeout(()=>print(),50)}
+addEventListener('afterprint',()=>document.body.classList.remove('pqr','pinv'));
 
 // ---------- customer ----------
 const mine=t=>orders.filter(o=>o.table===t&&o.uid===me());
@@ -274,28 +294,43 @@ ${canRate?rateCard(last,t):''}`;
 }
 
 // ---------- auth screens ----------
-function loginForm(title){app.innerHTML=`<div class="card"><h3>${esc(title)}</h3><input id="le" type="email" placeholder="Email" autocomplete="username"><input id="lp" type="password" placeholder="Password (6+ characters)" autocomplete="current-password">
-<div class="row"><button onclick="doLogin()">Login</button><button class="o" onclick="doSignup()">Naya account</button></div><p class="mut"><a href="#" onclick="doReset();return false">Password bhool gaye?</a></p></div>`}
+function loginForm(title,sub){app.innerHTML=`<div class="card"><h3 style="margin-top:0">${esc(title)}</h3>${sub?`<p class="mut">${sub}</p>`:''}<input id="le" type="email" placeholder="Email" autocomplete="username"><input id="lp" type="password" placeholder="Password" autocomplete="current-password" onkeydown="if(event.key==='Enter')doLogin()">
+<div class="row"><button style="flex:1" onclick="doLogin()">Login</button></div><p class="mut"><a href="#" onclick="doReset();return false">Password bhool gaye?</a></p></div>`}
+function landing(){
+  if(!base)return void(app.innerHTML='<div class="card">Pehle FIREBASE_CONFIG daalo (README dekho).</div>');
+  if(!user||user.isAnonymous){
+    app.innerHTML=`<div class="ltab"><button class="${ltab==='owner'?'on':''}" onclick="ltab='owner';landing()">🧑‍🍳 Hotel / Cafe login</button><button class="${ltab==='res'?'on':''}" onclick="ltab='res';landing()">👑 Reseller login</button></div><div id="lf"></div>`;
+    const keep=app.innerHTML;loginForm(ltab==='owner'?'Hotel / Cafe owner login':'Reseller login',ltab==='owner'?'Jo email aur password aapko diya gaya hai usse login karo. Orders, menu, QR sab yahin milega.':'Sirf reseller (admin) ke liye. Yahan se naye cafe banao.');
+    app.innerHTML=keep.replace('<div id="lf"></div>',app.innerHTML);return}
+  if(roleState===''){roleState='checking';detectRole().then(route)}
+  if(roleState==='checking')return void(app.innerHTML='<div class="card mut">Checking…</div>');
+  if(roleState==='admin')return superPanel();
+  const ids=Object.keys(myCafes);
+  if(ids.length===1){location.replace(ROOT+'?r='+ids[0]+'#admin');return}
+  if(ids.length)return void(app.innerHTML=`<div class="card"><h3>Apna cafe chuno</h3>${ids.map(k=>`<p><a class="btn" href="${ROOT}?r=${k}#admin">${esc(myCafes[k]||k)}</a></p>`).join('')}<button class="o" onclick="logout()">Logout</button></div>`);
+  app.innerHTML=`<div class="card"><h3>Koi cafe nahi mila</h3><p class="mut">${esc(user.email)} pe abhi koi cafe nahi hai. Reseller se sahi email set karwao.</p><button onclick="logout()">Logout</button></div>`;
+}
+async function detectRole(){
+  try{if((await fdb.ref('admins/'+user.uid).once('value')).val()===true){roleState='admin';return}}catch(e){}
+  try{myCafes=(await fdb.ref('owners/'+ekey(user.email)).once('value')).val()||{}}catch(e){myCafes={}}
+  roleState='owner';
+}
 const creds=()=>[$('#le').value.trim(),$('#lp').value];
-const authErr=e=>alert(({'auth/invalid-credential':'Email ya password galat hai','auth/wrong-password':'Password galat hai','auth/user-not-found':'Ye email registered nahi hai. "Naya account" dabao.','auth/email-already-in-use':'Ye email pehle se registered hai. Login karo.','auth/weak-password':'Password kam se kam 6 characters ka rakho'})[e.code]||e.message);
-async function doLogin(){unlockAudio();const[e,p]=creds();try{await firebase.auth().signInWithEmailAndPassword(e,p)}catch(x){authErr(x)}}
-async function doSignup(){const[e,p]=creds();try{const c=await firebase.auth().createUserWithEmailAndPassword(e,p);await c.user.sendEmailVerification();alert('Account ban gaya. Email pe verification link bheja hai, use kholo.')}catch(x){authErr(x)}}
-async function doReset(){const e=$('#le').value.trim();if(!e)return alert('Pehle email daalo');try{await firebase.auth().sendPasswordResetEmail(e);alert('Reset link email pe bhej diya')}catch(x){authErr(x)}}
-async function logout(){await firebase.auth().signOut();location.reload()}
-async function recheck(){await user.reload();await user.getIdToken(true);user=firebase.auth().currentUser;mode='';attach();route()}
-function verifyCard(){app.innerHTML=`<div class="card"><h3>Email verify karo</h3><p>${esc(user.email)} pe link bheja hai. Verify karke "Ho gaya" dabao.</p><div class="row"><button onclick="recheck()">Ho gaya ✅</button><button class="o" onclick="user.sendEmailVerification().then(()=>alert('Dobara bhej diya'))">Link dobara bhejo</button><button class="o" onclick="logout()">Logout</button></div></div>`}
+const authErr=e=>alert(({'auth/invalid-credential':'Email ya password galat hai','auth/invalid-login-credentials':'Email ya password galat hai','auth/wrong-password':'Password galat hai','auth/user-not-found':'Ye email registered nahi hai. Reseller se login banwao.','auth/email-already-in-use':'Ye email pehle se registered hai.','auth/weak-password':'Password kam se kam 6 characters ka rakho','auth/invalid-email':'Email sahi nahi hai','auth/too-many-requests':'Bahut try ho gaye. Thodi der baad try karo.'})[e.code]||e.message);
+async function doLogin(){unlockAudio();const[e,p]=creds();if(!e||!p)return alert('Email aur password dono daalo');try{await firebase.auth().signInWithEmailAndPassword(e,p)}catch(x){authErr(x)}}
+async function doReset(){const e=$('#le').value.trim();if(!e)return alert('Pehle email daalo');try{await firebase.auth().sendPasswordResetEmail(e);alert('Reset link email pe bhej diya (Spam bhi dekho)')}catch(x){authErr(x)}}
+async function logout(){await firebase.auth().signOut();location.href=ROOT}
 
 // ---------- admin ----------
 function admin(){
   if(base){
-    if(!user||user.isAnonymous)return loginForm('Owner login · '+CFG.name);
-    if(!user.emailVerified)return verifyCard();
+    if(!user||user.isAnonymous)return loginForm('Owner login · '+CFG.name,'Jo email aur password aapko diya gaya hai usse login karo.');
     if(ownerState==='no')return void(app.innerHTML=`<div class="card"><h3>Access nahi hai</h3><p class="mut">${esc(user.email)} is restaurant ka owner email nahi hai. Reseller se sahi email set karwao.</p><button onclick="logout()">Logout</button></div>`);
     if(ownerState!=='ok')return void(app.innerHTML='<div class="card mut">Checking access…</div>');
   }
   const live=orders.filter(o=>o.status!=='done').sort((a,b)=>a.ts-b.ts),hist=orders.filter(o=>o.status==='done').sort((a,b)=>b.ts-a.ts);
   const sndOn=AC&&AC.state==='running';
-  app.innerHTML=`<div class="tabs noprint"><button class="${tab==='orders'?'on':''}" onclick="tab='orders';admin()">🔔 Live (${live.length+calls.length})</button><button class="${tab==='hist'?'on':''}" onclick="tab='hist';admin()">🧾 History</button><button class="${tab==='offers'?'on':''}" onclick="tab='offers';admin()">📣 Offers</button><button class="${tab==='menu'?'on':''}" onclick="tab='menu';admin()">🍽 Menu</button><button class="${tab==='setup'?'on':''}" onclick="tab='setup';admin()">⚙ Setup</button><a class="btn o" href="#qr">🔳 QR</a>${sndOn?'':'<button id="snd" class="r" onclick="unlockAudio()">🔕 Sound ON karo</button>'}${base?'<button class="o" onclick="logout()">Logout</button>':''}</div><div id="v"></div>`;
+  app.innerHTML=`<div class="tabs noprint"><button class="${tab==='orders'?'on':''}" onclick="tab='orders';admin()">🔔 Live (${live.length+calls.length})</button><button class="${tab==='hist'?'on':''}" onclick="tab='hist';admin()">🧾 History</button><button class="${tab==='offers'?'on':''}" onclick="tab='offers';admin()">📣 Offers</button><button class="${tab==='menu'?'on':''}" onclick="tab='menu';admin()">🍽 Menu</button><button class="${tab==='qr'?'on':''}" onclick="tab='qr';admin()">🔳 QR</button><button class="${tab==='setup'?'on':''}" onclick="tab='setup';admin()">⚙ Setup</button>${sndOn?'':'<button id="snd" class="r" onclick="unlockAudio()">🔕 Sound ON karo</button>'}${base?'<button class="o" onclick="logout()">Logout</button>':''}</div><div id="v"></div>`;
   const v=$('#v');
   if(tab==='orders'){
     const cs=calls.slice().sort((a,b)=>a.ts-b.ts).map(c=>`<div class="card alert"><span><b>${callTxt(c)} · Table ${c.table}</b> <span class="mut">${ago(c.ts)}${c.type==='paid'?' · UPI app mein paisa aaya check karo':''}</span></span><button onclick="delCall('${c.k}')">✓ Ho gaya</button></div>`).join('');
@@ -304,7 +339,7 @@ function admin(){
   if(tab==='hist'){const t0=new Date().setHours(0,0,0,0),paid=hist.filter(o=>!o.cx),today=paid.filter(o=>o.ts>=t0),r=hist.filter(o=>o.rating),avg=r.length?(r.reduce((a,o)=>a+o.rating,0)/r.length).toFixed(1):'–';
     v.innerHTML=`<div class="card">💰 Aaj ki sale: <b>${rs(today.reduce((a,o)=>a+tot(o).t,0))}</b> (${today.length} orders) · ⭐ Rating: <b>${avg}</b> (${r.length})<div class="mut">Pichhle 36 ghante ke orders.</div></div>`+(hist.map(card).join('')||'<div class="card mut">Abhi koi completed order nahi.</div>')}
   if(tab==='offers')offersTab(v);
-  if(tab==='menu')menuEd(v);if(tab==='setup')setupEd(v);
+  if(tab==='menu')menuEd(v);if(tab==='setup')setupEd(v);if(tab==='qr')qrTab(v);
 }
 function tableCard(t,a){const sum=a.reduce((s,o)=>s+tot(o).t,0),ids=a.map(o=>o.id).join(',');
   return`<div style="border:2px solid var(--ac);border-radius:16px;padding:8px;margin-bottom:14px"><div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px;padding:4px 4px 8px"><b style="font-size:22px">🍽 Table ${t}</b><span style="font-size:18px">Total <b>${rs(sum)}</b> <span class="mut">(${a.length} order)</span></span></div>${a.map(o=>card(o)).join('')}<div class="row noprint" style="padding:0 4px 4px"><button class="o" onclick="invoice('${ids}')">🧾 Table bill</button><button class="r" onclick="closeTable('${ids}')">💰 Paid &amp; close table</button></div></div>`}
@@ -316,7 +351,7 @@ async function closeTable(ids){const a=ids.split(',').map(id=>orders.find(o=>o.i
   else{for(const o of a)await updOrder(o.id,{status:'done'});lsSet(LSC,lsGet(LSC).filter(c=>!tc.some(x=>x.k===c.k)));calls=lsGet(LSC);admin()}}
 function kot(id){const o=orders.find(z=>z.id===id);if(!o)return;const m=document.createElement('div');m.className='modal';
   m.innerHTML=`<div><div class="inv"><div style="text-align:center;font-weight:700">KOT · Kitchen</div><div style="font-size:26px;font-weight:800;text-align:center">TABLE ${o.table}</div><div style="font-size:13px;text-align:center">${new Date(o.ts).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})} · #${esc(o.id.slice(-5).toUpperCase())}</div><hr><table>${o.items.map(i=>`<tr><td style="font-size:20px"><b>${i.q} ×</b> ${esc(i.n)}</td></tr>`).join('')}</table>${o.note?`<hr><div style="font-size:18px">📝 ${esc(o.note)}</div>`:''}<hr></div>
-<div class="noprint row" style="justify-content:center"><button onclick="print()">🖨 Print KOT</button><button class="o" style="background:#fff" onclick="this.closest('.modal').remove()">Close</button></div></div>`;document.body.appendChild(m)}
+<div class="noprint row" style="justify-content:center"><button onclick="printInv()">🖨 Print KOT</button><button class="o" style="background:#fff" onclick="this.closest('.modal').remove()">Close</button></div></div>`;document.body.appendChild(m)}
 const pchk=i=>{const m=MENU.find(z=>z.n===i.n);return !m?' <b style="color:#b3261e">⚠ menu mein nahi</b>':m.p!==i.p?` <b style="color:#b3261e">⚠ rate ${rs(i.p)} (menu ${rs(m.p)})</b>`:''};
 function card(o){const x=tot(o),liveO=o.status!=='done';
   return`<div class="card"><div style="display:flex;justify-content:space-between;align-items:center"><b style="font-size:20px">Table ${o.table}</b><span class="tag ${o.cx?'cx':o.status}">${label(o)}</span></div>
@@ -337,19 +372,53 @@ async function offersTab(v){
   $('#oc').textContent=`${list.length} customers ne offers ke liye haan bola hai. WhatsApp message ready khulega, har ek ke liye Send dabao.`;
   $('#ol').innerHTML=list.map(c=>`<div class="card" style="display:flex;justify-content:space-between;align-items:center"><span>${esc(c.name||'Customer')} · ${esc(c.p)}</span><button class="w" onclick="open('https://wa.me/91${c.p}?text='+encodeURIComponent(offerTxt),'_blank')">WhatsApp</button></div>`).join('')||'<div class="card mut">Abhi koi customer nahi.</div>';
 }
-const rowH=m=>`<div class="card mrow"><input class="e" style="width:52px" value="${esc(m.e)}"><input class="n" style="flex:2;min-width:140px" placeholder="Dish" value="${esc(m.n)}"><input class="p" style="width:80px" inputmode="numeric" placeholder="₹" value="${m.p}"><input class="c" style="flex:1;min-width:110px" list="catl" placeholder="Category" value="${esc(m.c)}"><label><input type="checkbox" class="v" ${m.v?'checked':''}>Veg</label><label><input type="checkbox" class="a" ${m.o?'':'checked'}>Available</label><button class="r" onclick="this.parentNode.remove()">✕</button></div>`;
-function menuEd(v){v.innerHTML=`<div class="card mut">Dish khatam ho to <b>Available</b> hata ke Save karo, customers ko turant "Abhi khatam" dikhega. Veg hata do to non-veg 🔴 mark lagega.</div><datalist id="catl">${[...new Set(MENU.map(m=>m.c))].map(c=>`<option value="${esc(c)}">`).join('')}</datalist><div id="mr">${MENU.map(rowH).join('')}</div><div class="row"><button class="o" onclick="$('#mr').insertAdjacentHTML('beforeend',rowH({n:'',p:0,e:'🍽',c:'',v:true,o:false}))">+ Dish add</button><button onclick="saveM()">💾 Save menu</button></div>
-<div class="card" style="margin-top:12px"><b>📋 Bulk menu (paste)</b><div class="mut">Har line: <code>Dish, Rate, Category, veg/nonveg</code> · jaise <code>Chicken Biryani, 260, Rice, nonveg</code>. Excel/WhatsApp list se copy-paste kar sakte ho.</div><textarea id="bk" rows="6" placeholder="Paneer Tikka, 220, Starters, veg&#10;Chicken 65, 240, Starters, nonveg"></textarea><div class="row"><button class="o" onclick="bulk(0)">➕ Upar add karo</button><button class="r" onclick="bulk(1)">♻ Poora menu replace</button><button class="o" onclick="$('#bk').value=MENU.map(m=>[m.n,m.p,m.c,m.v?'veg':'nonveg'].join(', ')).join('\n')">📤 Current menu text</button></div></div>`}
-function bulk(rep){const em={drinks:'🥤',chai:'☕',coffee:'☕',dessert:'🍨',sweet:'🍮',rice:'🍛',biryani:'🍛',bread:'🫓',roti:'🫓',starter:'🍢',snack:'🥟',pizza:'🍕',burger:'🍔',chinese:'🥡',thali:'🍱',soup:'🍜'};
+const EMK={chai:'☕',tea:'☕',coffee:'☕',lassi:'🥛',shake:'🥤',juice:'🧃',drink:'🥤',mojito:'🍹',soda:'🥤',water:'💧',ice:'🍨',dessert:'🍨',sweet:'🍮',gulab:'🍮',cake:'🍰',biryani:'🍛',rice:'🍚',pulao:'🍚',naan:'🫓',roti:'🫓',paratha:'🫓',kulcha:'🫓',bread:'🫓',dosa:'🥞',idli:'🍘',vada:'🍩',pav:'🍔',burger:'🍔',pizza:'🍕',sandwich:'🥪',fries:'🍟',noodle:'🍜',chowmein:'🍜',maggi:'🍜',soup:'🍜',momo:'🥟',samosa:'🥟',chinese:'🥡',manchurian:'🥡',thali:'🍱',paneer:'🧀',dal:'🍲',chicken:'🍗',tandoori:'🍗',mutton:'🍖',fish:'🐟',prawn:'🦐',egg:'🥚',salad:'🥗',pasta:'🍝',starter:'🍢',tikka:'🍢',kebab:'🍢',snack:'🥟',chaat:'🥙',roll:'🌯',wrap:'🌯'};
+const autoEm=(n,c)=>{const t=(n+' '+(c||'')).toLowerCase(),k=Object.keys(EMK).find(k=>t.includes(k));return k?EMK[k]:'🍽'};
+const isNV=n=>/chicken|mutton|fish|prawn|egg|keema|meat|beef|pork|crab|lamb|non.?veg/i.test(n);
+const vnorm=v=>!/non|nv|egg|chicken|mutton|fish|prawn/i.test(v||'');
+let msT=null;
+function mSave(msg){clearTimeout(msT);msT=setTimeout(async()=>{try{await saveMenu();toast(msg||'Saved ✅',1500)}catch(e){alert('Save nahi hua: '+(e.code||e.message))}},250)}
+function menuEd(v){
+  const cats=[...new Set(MENU.map(m=>m.c))];if(!lastCat)lastCat=cats[0]||'';
+  v.innerHTML=`<div class="card"><b>➕ Nayi dish add karo</b>
+<input id="an" placeholder="Dish ka naam (jaise Paneer Tikka)" autocomplete="off">
+<div class="mrow"><input id="ap" style="flex:1;min-width:90px" inputmode="numeric" placeholder="₹ Rate"><input id="ac" style="flex:2;min-width:130px" list="catl" placeholder="Category (jaise Starters)" value="${esc(lastCat)}"><button id="av" type="button" class="st ${newV?'on':'off'}">${newV?'🟢 Veg':'🔴 Non-veg'}</button></div>
+<button id="ab" style="width:100%;margin-top:6px">+ Add dish</button>
+<div class="mut" style="margin-top:6px">Rate ke baad Enter dabao, dish turant add. Har badlav apne aap save hota hai ✅</div></div>
+<datalist id="catl">${cats.map(c=>`<option value="${esc(c)}">`).join('')}</datalist>
+<input id="mq" placeholder="🔍 Menu mein dhoondo (${MENU.length} dishes)" value="${esc(mq)}" style="margin-bottom:8px">
+<div id="ml2"></div>
+<details class="card" style="margin-top:12px"><summary><b>📋 Poori list ek saath paste karo</b></summary><div class="mut" style="margin-top:6px">Har line: <code>Dish, Rate, Category, veg/nonveg</code> · jaise <code>Chicken Biryani, 260, Rice, nonveg</code>. Excel ya WhatsApp list se copy-paste chalega.</div><textarea id="bk" rows="6" placeholder="Paneer Tikka, 220, Starters, veg&#10;Chicken 65, 240, Starters, nonveg"></textarea><div class="row"><button onclick="bulk(0)">➕ Menu mein jodo</button><button class="r" onclick="bulk(1)">♻ Poora menu badlo</button><button class="o" onclick="$('#bk').value=MENU.map(m=>[m.n,m.p,m.c,m.v?'veg':'nonveg'].join(', ')).join('\\n')">📤 Abhi ka menu text</button></div></details>`;
+  const an=$('#an'),ap=$('#ap'),ac=$('#ac'),av=$('#av');
+  const setV=x=>{newV=x;av.className='st '+(x?'on':'off');av.textContent=x?'🟢 Veg':'🔴 Non-veg'};
+  av.onclick=()=>setV(!newV);an.oninput=()=>{if(isNV(an.value))setV(false)};
+  const add=()=>{const n=an.value.trim().slice(0,60),p=+ap.value.replace(/[^\d.]/g,''),c=ac.value.trim().slice(0,30)||'Menu';
+    if(!n){an.focus();return alert('Dish ka naam likho')}if(!p){ap.focus();return alert('Rate likho')}
+    if(MENU.some(m=>m.n.toLowerCase()===n.toLowerCase())&&!confirm(n+' pehle se menu mein hai. Phir bhi add karein?'))return;
+    MENU.push({n,p,e:autoEm(n,c),c,v:newV,o:false});lastCat=c;mSave('✅ '+n+' add ho gayi');an.value='';ap.value='';setV(true);
+    if(![...$('#catl').options].some(o=>o.value===c))$('#catl').insertAdjacentHTML('beforeend',`<option value="${esc(c)}">`);drawML();an.focus()};
+  $('#ab').onclick=add;ap.onkeydown=e=>{if(e.key==='Enter')add()};an.onkeydown=e=>{if(e.key==='Enter')ap.focus()};ac.onkeydown=e=>{if(e.key==='Enter')add()};
+  $('#mq').oninput=e=>{mq=e.target.value;drawML()};
+  drawML();
+}
+function drawML(){const el=$('#ml2');if(!el)return;const ql=mq.trim().toLowerCase(),g={};
+  MENU.forEach((m,i)=>{if(!ql||m.n.toLowerCase().includes(ql))(g[m.c]=g[m.c]||[]).push(i)});
+  el.innerHTML=Object.keys(g).length?Object.entries(g).map(([c,a])=>`<h3 class="ch">${esc(c)} <span class="mut">(${a.length})</span> <a href="#" class="mut" style="font-size:12px" onclick="renCat(${JSON.stringify(c).replace(/"/g,'&quot;')});return false">✏ naam badlo</a></h3>${a.map(i=>i===medit?editRow(i):itemRow(i)).join('')}`).join(''):'<div class="card mut">Koi dish nahi. Upar se add karo.</div>';
+  const f=$('#en');if(f)f.focus()}
+function itemRow(i){const m=MENU[i];return`<div class="card mi ${m.o?'oos':''}"><span class="em">${esc(m.e)}</span><div style="flex:1;min-width:0"><div class="n">${vdot(m.v)} ${esc(m.n)}</div><div class="mut">${rs(m.p)}</div></div><button class="st ${m.o?'off':'on'}" onclick="mAvail(${i})">${m.o?'❌ Khatam':'✅ Hai'}</button><button class="o" title="Edit" onclick="medit=${i};drawML()">✏</button><button class="o" title="Delete" onclick="mDel(${i})">🗑</button></div>`}
+function editRow(i){const m=MENU[i];return`<div class="card" style="border:2px solid var(--ac)"><div class="mrow"><input id="ee" style="width:56px" value="${esc(m.e)}"><input id="en" style="flex:2;min-width:140px" value="${esc(m.n)}" placeholder="Dish"><input id="ep" style="width:90px" inputmode="numeric" value="${m.p}" placeholder="₹"></div><div class="mrow"><input id="ec" style="flex:1;min-width:130px" list="catl" value="${esc(m.c)}" placeholder="Category"><label><input type="checkbox" id="evg" ${m.v?'checked':''}>🟢 Veg</label></div><div class="row"><button onclick="mUpd(${i})">💾 Save</button><button class="o" onclick="medit=-1;drawML()">Cancel</button></div></div>`}
+function mUpd(i){const n=$('#en').value.trim().slice(0,60),p=+$('#ep').value.replace(/[^\d.]/g,'');if(!n||!p)return alert('Naam aur rate dono chahiye');
+  Object.assign(MENU[i],{n,p,e:$('#ee').value.trim()||autoEm(n,$('#ec').value),c:$('#ec').value.trim().slice(0,30)||'Menu',v:$('#evg').checked});medit=-1;mSave();drawML()}
+function mAvail(i){MENU[i].o=!MENU[i].o;mSave(MENU[i].o?'❌ '+MENU[i].n+' khatam dikhega':'✅ '+MENU[i].n+' wapas available');drawML()}
+function mDel(i){if(MENU.length<2)return alert('Kam se kam 1 dish chahiye');if(!confirm(MENU[i].n+' menu se hatayein?'))return;const n=MENU[i].n;MENU.splice(i,1);medit=-1;mSave('🗑 '+n+' hata di');drawML()}
+function renCat(c){const n=(prompt('"'+c+'" ka naya naam:',c)||'').trim().slice(0,30);if(!n||n===c)return;MENU.forEach(m=>{if(m.c===c)m.c=n});if(lastCat===c)lastCat=n;mSave('Category badal di ✅');menuEd($('#v'))}
+function bulk(rep){
   const rows=$('#bk').value.split('\n').map(l=>l.split(/[,\t|]/).map(x=>x.trim())).filter(a=>a[0]),bad=[];
-  const a=rows.map(([n,p,c,v],i)=>{const pr=+String(p||'').replace(/rs\.?|inr/ig,'').replace(/[^\d.]/g,'');if(!pr)bad.push(i+1);const cc=c||'Menu',k=Object.keys(em).find(k=>(cc+' '+n).toLowerCase().includes(k));return{n:n.slice(0,60),p:pr||0,e:k?em[k]:'🍽',c:cc,v:!/non|nv|egg|chicken|mutton|fish|prawn/i.test(v||'')&&!/chicken|mutton|fish|prawn|egg/i.test(n),o:false}});
+  const a=rows.map(([n,p,c,v],i)=>{const pr=+String(p||'').replace(/rs\.?|inr/ig,'').replace(/[^\d.]/g,'');if(!pr)bad.push(i+1);const cc=(c||'Menu').slice(0,30);return{n:n.slice(0,60),p:pr||0,e:autoEm(n,cc),c:cc,v:vnorm(v)&&!isNV(n),o:false}});
   if(!a.length)return alert('Pehle list paste karo');
   if(bad.length&&!confirm('Line '+bad.join(', ')+' mein rate nahi mila (₹0 lagega). Phir bhi aage badhein?'))return;
   if(rep&&!confirm('Poora purana menu hata ke '+a.length+' dishes daalein?'))return;
-  const keep=rep?[]:[...document.querySelectorAll('#mr .mrow')].map(r=>({e:r.querySelector('.e').value,n:r.querySelector('.n').value,p:+r.querySelector('.p').value||0,c:r.querySelector('.c').value,v:r.querySelector('.v').checked,o:!r.querySelector('.a').checked})).filter(x=>x.n);
-  $('#mr').innerHTML=keep.concat(a).map(rowH).join('');$('#bk').value='';toast(a.length+' dishes add hui. Check karke 💾 Save menu dabao.')}
-async function saveM(){const a=[...document.querySelectorAll('#mr .mrow')].map(r=>({e:r.querySelector('.e').value.trim()||'🍽',n:r.querySelector('.n').value.trim(),p:+r.querySelector('.p').value||0,c:r.querySelector('.c').value.trim()||'Menu',v:r.querySelector('.v').checked,o:!r.querySelector('.a').checked})).filter(x=>x.n);
-  if(!a.length)return alert('Kam se kam 1 dish chahiye');MENU=a;await saveMenu();toast('Menu saved ✅');tab='orders';admin()}
+  MENU=rep?a:MENU.concat(a);mq='';medit=-1;mSave(a.length+' dishes save ho gayi ✅');menuEd($('#v'))}
 function setupEd(v){v.innerHTML=`<div class="card"><label class="mut">Restaurant name</label><input id="sn" value="${esc(CFG.name)}"><label class="mut">Tagline (e.g. Pure Veg, Family Restaurant)</label><input id="st2" value="${esc(CFG.tag)}"><label class="mut">Brand color</label><input id="sc" type="color" value="${esc(CFG.color)}" style="height:44px"><label class="mut">GST % (0 = no GST)</label><input id="sg" inputmode="numeric" value="${CFG.gst}"><label class="mut">UPI ID (customer table se pay karega, e.g. cafe@okhdfc)</label><input id="su" value="${esc(CFG.upi||'')}"><label class="mut">Restaurant ka WhatsApp number (customer isi pe "bill bhejo" message karega)</label><input id="swa" inputmode="numeric" maxlength="13" placeholder="98XXXXXXXX" value="${esc(CFG.wa||'')}"><label class="mut">Google review link (Google Business Profile → "Ask for reviews" → copy link)</label><input id="sgr" placeholder="https://g.page/r/.../review" value="${esc(CFG.grev||'')}"><label class="mut">Kitne tables?</label><input id="stb" inputmode="numeric" value="${CFG.tables||20}"><button style="margin-top:8px" onclick="saveS()">💾 Save</button></div>`}
 async function saveS(){CFG.name=$('#sn').value.trim()||CFG.name;CFG.tag=$('#st2').value.trim();CFG.color=$('#sc').value;CFG.gst=+$('#sg').value||0;CFG.upi=$('#su').value.trim();const wa=$('#swa').value.replace(/\D/g,'').slice(-10);if(wa&&!/^[6-9]\d{9}$/.test(wa)){alert('Sahi 10-digit WhatsApp number daalo');return}CFG.wa=wa;const gr=$('#sgr').value.trim();if(gr&&!/^https:\/\//.test(gr)){alert('Google review link https:// se shuru hona chahiye');return}CFG.grev=gr;CFG.tables=Math.min(200,Math.max(1,+$('#stb').value||20));await saveCfg();toast('Saved ✅');tab='orders';admin()}
 function invoice(ids){
@@ -363,29 +432,69 @@ function invoice(ids){
   m.innerHTML=`<div><div class="inv"><h3 style="margin:0">${esc(CFG.name)}</h3><div style="font-size:12px">${esc(CFG.tag)}</div><hr>
 <div style="font-size:13px">No: ${no}<br>Table: ${o.table} · ${new Date(o.ts).toLocaleString()}</div><hr>
 <table>${o.items.map(i=>`<tr><td>${i.q}× ${esc(i.n)}</td><td class="r">${rs(i.p*i.q)}</td></tr>`).join('')}<tr><td>Subtotal</td><td class="r">${rs(x.s)}</td></tr><tr><td>GST ${x.gp}%</td><td class="r">${rs(x.g)}</td></tr><tr><td><b>Total</b></td><td class="r"><b>${rs(x.t)}</b></td></tr></table><hr><div style="text-align:center;font-size:13px">Thank you, visit again! 🙏</div></div>
-<div class="noprint row" style="justify-content:center"><button onclick="print()">🖨 Print</button><button class="w" id="wb">WhatsApp bill</button><button class="o" style="background:#fff" onclick="this.closest('.modal').remove()">Close</button></div></div>`;
+<div class="noprint row" style="justify-content:center"><button onclick="printInv()">🖨 Print</button><button class="w" id="wb">WhatsApp bill</button><button class="o" style="background:#fff" onclick="this.closest('.modal').remove()">Close</button></div></div>`;
   document.body.appendChild(m);$('#wb').onclick=()=>open('https://wa.me/'+(o.phone?'91'+o.phone:'')+'?text='+encodeURIComponent(txt),'_blank');
 }
 
 // ---------- reseller ----------
+const slug=t=>t.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-+|-+$/g,'').slice(0,30);
+let SEC=null;
+async function mkOwner(email,pw){
+  SEC=SEC||firebase.initializeApp(FIREBASE_CONFIG,'sec');
+  try{await SEC.auth().setPersistence(firebase.auth.Auth.Persistence.NONE)}catch(e){}
+  try{await SEC.auth().createUserWithEmailAndPassword(email,pw);await SEC.auth().signOut();return 'new'}
+  catch(e){if(e.code==='auth/email-already-in-use')return 'exists';throw e}
+}
+function shareLogin(name,email,pw,exists){
+  const txt=`🎉 ${name} ka QR Menu app ready hai!\n\nApp kholo: ${ROOT}\nEmail: ${email}\n${exists?'Password: aapka purana password (bhool gaye to login page pe "Password bhool gaye?")':'Password: '+pw}\n\nLogin karke 🍽 Menu bharo, ⚙ Setup mein UPI/WhatsApp daalo, 🔳 QR tab se table QR print karo.`;
+  const m=document.createElement('div');m.className='modal';
+  m.innerHTML=`<div class="sheet"><h3 style="margin-top:0">✅ Owner ko ye bhejo</h3><textarea rows="9" readonly id="shx">${esc(txt)}</textarea><div class="row"><button class="w" id="shw">📲 WhatsApp pe bhejo</button><button class="o" id="shc">📋 Copy</button><button class="o" onclick="this.closest('.modal').remove()">Close</button></div></div>`;
+  document.body.appendChild(m);$('#shw').onclick=()=>open('https://wa.me/?text='+encodeURIComponent(txt),'_blank');
+  $('#shc').onclick=()=>{navigator.clipboard.writeText(txt).then(()=>toast('Copy ho gaya ✅'),()=>{$('#shx').select();document.execCommand('copy')})}}
+let SL={},SO={};
 async function superPanel(){
   if(!base)return void(app.innerHTML='<div class="card">Pehle FIREBASE_CONFIG daalo (README dekho).</div>');
-  if(!user||user.isAnonymous)return loginForm('Reseller login');
-  let list;try{list=(await fdb.ref('index').once('value')).val()||{}}catch(e){
-    return void(app.innerHTML=`<div class="card"><h3>Admin access nahi hai</h3><p class="mut">Firebase console → Realtime Database → <code>admins</code> ke andar key <code>${esc(user.uid)}</code> value <code>true</code> add karo, phir reload.</p><button onclick="logout()">Logout</button></div>`)}
-  const root=location.href.split('#')[0].split('?')[0];
-  app.innerHTML=`<div class="card"><h3>➕ New restaurant / cafe</h3><input id="rn" placeholder="Name (e.g. Sahara Cafe)"><input id="rid" placeholder="short-id (e.g. sahara-cafe)"><input id="re" type="email" placeholder="Owner ka email (isse login karega)"><label class="mut">Menu</label><select id="rcp" style="width:100%;padding:10px;border:1px solid var(--bd);border-radius:10px;background:var(--card);color:var(--tx);font:inherit;margin:4px 0"><option value="">Sample menu (12 dishes)</option><option value="-">Khaali menu</option>${Object.keys(list).map(k=>`<option value="${esc(k)}">Copy from: ${esc(list[k])}</option>`).join('')}</select><button style="margin-top:8px" onclick="mk()">Create</button></div>
-<div class="card"><b>Your restaurants (${Object.keys(list).length})</b>${Object.keys(list).map(k=>`<p>${esc(list[k])}<br><span class="mut">Owner: <a href="${root}?r=${k}#admin">?r=${k}#admin</a> (aap bhi isi login se menu bhar sakte ho) · <a href="${root}?r=${k}#qr">QR codes</a></span></p>`).join('')||'<p class="mut">Abhi koi nahi</p>'}<button class="o" onclick="logout()">Logout</button></div>`;
+  if(!user||user.isAnonymous){ltab='res';return landing()}
+  $('#hn').textContent='👑 Reseller panel';
+  try{SL=(await fdb.ref('index').once('value')).val()||{}}catch(e){
+    return void(app.innerHTML=`<div class="card"><h3>Ye reseller account nahi hai</h3><p class="mut">${esc(user.email)} ko reseller access nahi hai.</p><button onclick="logout()">Logout</button></div>`)}
+  const ids=Object.keys(SL);SO={};
+  await Promise.all(ids.map(async k=>{try{SO[k]=(await fdb.ref('restaurants/'+k+'/owner').once('value')).val()||''}catch(e){SO[k]=''}}));
+  const fix={};ids.forEach(k=>{if(SO[k])fix['owners/'+ekey(SO[k])+'/'+k]=SL[k]});if(ids.length)fdb.ref().update(fix).catch(()=>{});
+  app.innerHTML=`<div class="card"><h3 style="margin-top:0">➕ Naya hotel / cafe</h3>
+<input id="rn" placeholder="Cafe ka naam (jaise Sahara Cafe)"><input id="rid" placeholder="short-id (apne aap banega)"><input id="re" type="email" placeholder="Owner ka email (isse login karega)"><input id="rp" placeholder="Owner ka password (6+ characters)" autocomplete="new-password">
+<label class="mut">Menu</label><select id="rcp"><option value="">Sample menu (12 dishes)</option><option value="-">Khaali menu</option>${ids.map(k=>`<option value="${esc(k)}">Copy: ${esc(SL[k])}</option>`).join('')}</select>
+<button style="width:100%;margin-top:6px" id="mkb" onclick="mk()">✅ Cafe banao + owner login banao</button></div>
+<div class="card"><b>Aapke cafes (${ids.length})</b>${ids.map(k=>`<div style="border-top:1px solid var(--bd);padding:8px 0;margin-top:6px"><b>${esc(SL[k])}</b> <span class="mut">(${esc(k)})</span><div class="mut">Owner: ${esc(SO[k]||'—')}</div><div class="row"><a class="btn" href="${ROOT}?r=${k}#admin">🧑‍🍳 Dashboard</a><a class="btn o" target="_blank" href="${ROOT}?r=${k}#table1">👀 Menu</a><button class="o" onclick="ownLogin('${k}')">🔑 Login</button><button class="o" onclick="chOwner('${k}')">✉ Owner badlo</button><button class="r" onclick="delCafe('${k}')">🗑</button></div></div>`).join('')||'<p class="mut">Abhi koi nahi</p>'}</div>
+<button class="o" onclick="logout()">Logout</button>`;
+  let touched=false;$('#rid').oninput=()=>touched=true;$('#rn').oninput=()=>{if(!touched)$('#rid').value=slug($('#rn').value)};
 }
 async function mk(){
-  const name=$('#rn').value.trim(),id=$('#rid').value.trim().toLowerCase().replace(/[^a-z0-9-]/g,''),email=$('#re').value.trim().toLowerCase();
-  if(!name||!id||!/^\S+@\S+\.\S+$/.test(email))return alert('Name, short-id aur sahi owner email teeno bharo');
-  if((await fdb.ref('restaurants/'+id+'/config').once('value')).exists())return alert('Ye short-id pehle se hai');
-  const cp=$('#rcp').value;let menu=JSON.stringify(DEF);
-  if(cp==='-')menu=JSON.stringify([{n:'Masala Chai',p:30,e:'☕',c:'Drinks',v:true,o:false}]);
-  else if(cp){try{const v=(await fdb.ref('restaurants/'+cp+'/menu').once('value')).val();if(v&&JSON.parse(v).length)menu=v}catch(e){return alert('Menu copy nahi hua: '+(e.code||e.message))}}
-  const up={};up['restaurants/'+id+'/config']={name,tag:'',color:'#2e8b3d',gst:5,offer:'',upi:'',tables:20,wa:'',grev:''};up['restaurants/'+id+'/menu']=menu;up['restaurants/'+id+'/owner']=email;up['index/'+id]=name;
-  try{await fdb.ref().update(up);alert('Ban gaya ✅ Owner ko bolo: dashboard link kholo, "Naya account" se isi email se account banao aur verify karo.');superPanel()}catch(e){alert('Error: '+(e.code||e.message))}
+  const name=$('#rn').value.trim(),id=slug($('#rid').value.trim()||name),email=$('#re').value.trim().toLowerCase(),pw=$('#rp').value;
+  if(!name||!id||!/^\S+@\S+\.\S+$/.test(email))return alert('Naam, short-id aur sahi owner email bharo');
+  if(pw.length<6)return alert('Owner password kam se kam 6 characters ka rakho');
+  const b=$('#mkb');b.disabled=true;b.textContent='Ban raha hai…';const done=()=>{b.disabled=false;b.textContent='✅ Cafe banao + owner login banao'};
+  try{
+    if((await fdb.ref('restaurants/'+id+'/config').once('value')).exists()){done();return alert('Ye short-id pehle se hai, dusra likho')}
+    const cp=$('#rcp').value;let menu=JSON.stringify(DEF);
+    if(cp==='-')menu=JSON.stringify([{n:'Masala Chai',p:30,e:'☕',c:'Drinks',v:true,o:false}]);
+    else if(cp){const v=(await fdb.ref('restaurants/'+cp+'/menu').once('value')).val();if(v&&JSON.parse(v).length)menu=v}
+    const st=await mkOwner(email,pw);
+    if(st==='exists'&&!confirm(email+' ka login pehle se bana hua hai. Owner apna purana password use karega. Aage badhein?')){done();return}
+    const up={};up['restaurants/'+id+'/config']={name,tag:'',color:'#2e8b3d',gst:5,offer:'',upi:'',tables:20,wa:'',grev:''};up['restaurants/'+id+'/menu']=menu;up['restaurants/'+id+'/owner']=email;up['index/'+id]=name;up['owners/'+ekey(email)+'/'+id]=name;
+    await fdb.ref().update(up);done();await superPanel();shareLogin(name,email,pw,st==='exists');
+  }catch(e){done();authErr(e)}
 }
+async function ownLogin(k){const email=SO[k];if(!email)return alert('Pehle owner email set karo (✉ Owner badlo)');
+  const pw=prompt('Naya login banane ke liye '+email+' ka password likho (6+ characters).\nAgar account pehle se hai to reset link email pe jayega.','');if(pw==null)return;
+  try{if(pw.length>=6){const st=await mkOwner(email,pw);if(st==='new')return shareLogin(SL[k],email,pw,false)}
+    if(confirm(email+' ka account pehle se hai. Password reset link us email pe bhejein?')){await firebase.auth().sendPasswordResetEmail(email);alert('Reset link bhej diya. Owner apna email check kare (Spam bhi).')}
+  }catch(e){authErr(e)}}
+async function chOwner(k){const old=SO[k]||'',e=(prompt('Naya owner email:',old)||'').trim().toLowerCase();if(!e||e===old)return;if(!/^\S+@\S+\.\S+$/.test(e))return alert('Email sahi nahi hai');
+  const up={};up['restaurants/'+k+'/owner']=e;up['owners/'+ekey(e)+'/'+k]=SL[k];if(old)up['owners/'+ekey(old)+'/'+k]=null;
+  try{await fdb.ref().update(up);await superPanel();if(confirm('Owner badal gaya ✅ Ab '+e+' ka login banayein?'))ownLogin(k)}catch(x){alert('Error: '+(x.code||x.message))}}
+async function delCafe(k){if(prompt('Pakka delete? Saare orders aur menu hamesha ke liye chale jayenge.\nConfirm ke liye short-id likho: '+k)!==k)return;
+  const up={};up['restaurants/'+k]=null;up['index/'+k]=null;if(SO[k])up['owners/'+ekey(SO[k])+'/'+k]=null;
+  try{await fdb.ref().update(up);toast('Delete ho gaya');superPanel()}catch(e){alert('Error: '+(e.code||e.message))}}
 init();
 </script></body></html>

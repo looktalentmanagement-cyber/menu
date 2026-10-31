@@ -1,0 +1,73 @@
+{
+  "rules": {
+    "admins": {
+      ".read": "auth != null && root.child('admins/'+auth.uid).exists()",
+      ".write": false
+    },
+    "index": {
+      ".read": "auth != null && root.child('admins/'+auth.uid).exists()",
+      ".write": "auth != null && root.child('admins/'+auth.uid).exists()"
+    },
+    "restaurants": {
+      "$r": {
+        "config": {
+          ".read": true,
+          ".write": "auth != null && (root.child('admins/'+auth.uid).exists() || (auth.token.email != null && auth.token.email.toLowerCase() == root.child('restaurants/'+$r+'/owner').val()))"
+        },
+        "menu": {
+          ".read": true,
+          ".write": "auth != null && (root.child('admins/'+auth.uid).exists() || (auth.token.email != null && auth.token.email.toLowerCase() == root.child('restaurants/'+$r+'/owner').val()))"
+        },
+        "owner": {
+          ".read": "auth != null && (root.child('admins/'+auth.uid).exists() || (auth.token.email != null && auth.token.email.toLowerCase() == root.child('restaurants/'+$r+'/owner').val()))",
+          ".write": "auth != null && root.child('admins/'+auth.uid).exists()"
+        },
+        "orders": {
+          ".read": "(auth != null && (root.child('admins/'+auth.uid).exists() || (auth.token.email != null && auth.token.email.toLowerCase() == root.child('restaurants/'+$r+'/owner').val()))) || (auth != null && query.orderByChild == 'uid' && query.equalTo == auth.uid)",
+          ".indexOn": [
+            "uid",
+            "ts"
+          ],
+          "$o": {
+            ".write": "(auth != null && (root.child('admins/'+auth.uid).exists() || (auth.token.email != null && auth.token.email.toLowerCase() == root.child('restaurants/'+$r+'/owner').val()))) || (auth != null && !data.exists() && newData.child('uid').val() == auth.uid && newData.child('status').val() == 'new' && newData.child('ts').val() == now && newData.parent().parent().child('rl/'+auth.uid).val() == now && root.child('restaurants/'+$r+'/config').exists())",
+            ".validate": "newData.hasChildren(['table','items','ts','uid','status'])",
+            "table": {
+              ".validate": "newData.isNumber() && newData.val() >= 1 && newData.val() <= 200"
+            },
+            "rating": {
+              ".write": "auth != null && data.parent().child('uid').val() == auth.uid",
+              ".validate": "newData.isNumber() && newData.val() >= 1 && newData.val() <= 5"
+            }
+          }
+        },
+        "calls": {
+          ".read": "auth != null && (root.child('admins/'+auth.uid).exists() || (auth.token.email != null && auth.token.email.toLowerCase() == root.child('restaurants/'+$r+'/owner').val()))",
+          "$c": {
+            ".write": "(auth != null && (root.child('admins/'+auth.uid).exists() || (auth.token.email != null && auth.token.email.toLowerCase() == root.child('restaurants/'+$r+'/owner').val()))) || (auth != null && !data.exists() && newData.child('uid').val() == auth.uid && newData.child('ts').val() == now && newData.parent().parent().child('rl/'+auth.uid).val() == now)",
+            ".validate": "newData.hasChildren(['table','type','ts']) && newData.child('table').isNumber() && newData.child('table').val() >= 1 && newData.child('table').val() <= 200 && newData.child('type').isString() && newData.child('type').val().matches(/^(waiter|bill|paid)$/) && (!newData.child('amt').exists() || (newData.child('amt').isNumber() && newData.child('amt').val() >= 0 && newData.child('amt').val() <= 1000000))"
+          }
+        },
+        "customers": {
+          ".read": "auth != null && (root.child('admins/'+auth.uid).exists() || (auth.token.email != null && auth.token.email.toLowerCase() == root.child('restaurants/'+$r+'/owner').val()))",
+          "$p": {
+            ".write": "(auth != null && (root.child('admins/'+auth.uid).exists() || (auth.token.email != null && auth.token.email.toLowerCase() == root.child('restaurants/'+$r+'/owner').val()))) || (auth != null && newData.exists() && newData.parent().parent().child('rl/'+auth.uid).val() == now)",
+            ".validate": "!newData.exists() || ($p.matches(/^[6-9][0-9]{9}$/) && newData.hasChildren(['ts']))"
+          }
+        },
+        "rl": {
+          "$u": {
+            ".read": "auth != null && auth.uid == $u",
+            ".write": "auth != null && auth.uid == $u && newData.val() == now && (!data.exists() || data.val() < now - 15000)"
+          }
+        },
+        ".write": "auth != null && root.child('admins/'+auth.uid).exists()"
+      }
+    },
+    "owners": {
+      "$k": {
+        ".read": "auth != null && (root.child('admins/'+auth.uid).exists() || (auth.token.email != null && auth.token.email.toLowerCase().replace('.', ',') == $k))",
+        ".write": "auth != null && root.child('admins/'+auth.uid).exists()"
+      }
+    }
+  }
+}
