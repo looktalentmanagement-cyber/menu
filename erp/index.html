@@ -226,15 +226,16 @@ async function loadAll() {
   S.items = await DB.all('items'); S.parties = await DB.all('parties'); S.vouchers = await DB.all('vouchers');
   dirty();
 }
-async function saveSettings() { await DB.put('kv', S.settings, 'settings'); }
+async function saveSettings() { S.settings.updatedAt = Date.now(); await DB.put('kv', S.settings, 'settings'); clPushSettings(); }
 async function saveRec(store, rec) {
+  if (!canSave(store, rec)) { denyToast(); throw new Error('role'); }
   rec.updatedAt = Date.now(); if (!rec.createdAt) rec.createdAt = rec.updatedAt;
   await DB.put(store, rec);
   const arr = S[store]; const i = arr.findIndex(x => x.id === rec.id);
   if (i >= 0) arr[i] = rec; else arr.push(rec);
-  dirty();
+  dirty(); clPushRec(store, rec);
 }
-async function delRec(store, id) { await DB.del(store, id); S[store] = S[store].filter(x => x.id !== id); dirty(); }
+async function delRec(store, id) { if (clOn() && !can('delete')) { denyToast(); throw new Error('role'); } await DB.del(store, id); S[store] = S[store].filter(x => x.id !== id); dirty(); clPushDel(store, id); }
 const item = id => S.items.find(x => x.id === id);
 const party = id => S.parties.find(x => x.id === id);
 const vch = id => S.vouchers.find(x => x.id === id);
@@ -388,7 +389,7 @@ let toastT;
 function toast(m) { const t = $('#toast'); t.textContent = m; t.classList.add('on'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('on'), 2400); }
 let OVCB = null;
 function openOv(html, center) {
-  const ov = $('#ov'); ov.innerHTML = html; ov.style.alignItems = center ? 'center' : 'flex-end'; ov.classList.add('on');
+  const ov = $('#ov'); ov.innerHTML = html; ov.style.alignItems = center ? 'center' : 'flex-end'; ov.classList.add('on'); applyRole();
 }
 function closeOv() { const ov = $('#ov'); ov.classList.remove('on'); ov.innerHTML = ''; if (OVCB) { const f = OVCB; OVCB = null; f(); } }
 function ask(msg, { ok = 'Haan', cancel = 'Nahi', danger = false } = {}) {
@@ -435,7 +436,7 @@ function openWA(phone, text) { const ph = waPhone(phone); window.open(`https://w
 /* ================= Shell + Router ================= */
 const TABS = [['home', 'Home', ICON.home], ['bill', 'Bill', ICON.bill], ['stock', 'Stock', ICON.stock], ['party', 'Party', ICON.party], ['more', 'More', ICON.more]];
 function hdr(title, { back = false, right = '' } = {}) {
-  $('#hdr').innerHTML = `${back ? `<button class="hbtn" aria-label="Back" onclick="goBack()">${ICON.back}</button>` : ''}<h1>${esc(title)}</h1>${right}`;
+  $('#hdr').innerHTML = `${back ? `<button class="hbtn" aria-label="Back" onclick="goBack()">${ICON.back}</button>` : ''}<h1>${esc(title)}</h1>${CL.cfg ? syncChip() : ''}${right}`;
 }
 const searchBtn = () => `<button class="hbtn" aria-label="Search" onclick="go('search')">${ICON.search}</button>`;
 function go(h) { location.hash = '#/' + h; }
@@ -459,10 +460,12 @@ function render() {
   if (!FORM_ROUTES.includes(a) && q.ret !== '1') F = null;
   route();
   if (window.PENDING_RESULT && FORM_ROUTES.includes(a)) { const { cb, r } = window.PENDING_RESULT; window.PENDING_RESULT = null; cb(r); }
+  applyRole();
 }
 function route() {
   if (!S.settings.setupDone) { setTabs(null); return vSetup(); }
   const { parts, q } = parseHash(); const [a, b, c] = parts;
+  if (!routeAllowed(a, b)) { denyToast(); return replaceTo('home'); }
   $('#main').innerHTML = ''; const fab = $('#fab'); if (fab) fab.remove();
   window.scrollTo(0, 0);
   const tabViews = { home: vHome, bill: vBills, stock: vStock, party: vParties, more: vMore };
@@ -510,7 +513,7 @@ function vSetup() {
     <div class="f"><label>Logo (optional)</label><div style="display:flex;gap:12px;align-items:center">${c.logo ? `<img class="logo-prev" src="${c.logo}" alt="logo">` : '<div class="logo-prev" style="display:grid;place-items:center;color:#aaa">Logo</div>'}<label class="btn sec sm" style="margin:0">Upload<input type="file" accept="image/*" hidden onchange="pickLogo(this,()=>{WIZ.c.logo=LOGO_TMP;vSetup()})"></label>${c.logo ? '<button class="btn ghost sm" onclick="WIZ.c.logo=\'\';vSetup()">Hatayein</button>' : ''}</div></div>
     <div class="f"><label>Bank details (invoice footer)</label><textarea id="w_bank" placeholder="Bank: SBI&#10;A/c No: 1234567890&#10;IFSC: SBIN0001234">${esc(c.bank)}</textarea></div>
     <div class="f"><label>Terms (invoice footer)</label><textarea id="w_terms">${esc(c.terms)}</textarea></div>`;
-  $('#main').innerHTML = `<div class="steps">${[1, 2, 3].map(i => `<i class="${i <= s ? 'on' : ''}"></i>`).join('')}</div><div class="card">${body}</div>`;
+  $('#main').innerHTML = `<div class="steps">${[1, 2, 3].map(i => `<i class="${i <= s ? 'on' : ''}"></i>`).join('')}</div><div class="card">${body}</div>${s === 1 ? (CL.cfg ? `<div class="card" style="font-size:13px">☁️ Cloud login: <b>${esc(CL.cfg.email)}</b> · <span id="cloudStatus" class="tag ${clState().c}">${esc(clState().t)}</span><div class="mu" style="margin-top:4px">Company ka data aa raha hai... agar nahi aa raha to Owner se puchhein ki business setup ho gaya hai.</div><button class="btn ghost sm" style="margin-top:8px" onclick="clLogout()">Logout</button></div>` : `<div class="card" style="text-align:center"><div class="mu" style="font-size:13px;margin-bottom:8px">Staff ho ya company pehle se cloud par hai?</div><button class="btn ghost full" id="wizLogin" onclick="cloudSheet('login')">☁️ Cloud Login Karein</button></div>`) : ''}`;
   const sb = document.createElement('div'); sb.className = 'savebar'; sb.id = 'fab';
   sb.innerHTML = `${s > 1 ? '<button class="btn ghost" onclick="wizNext(-1)">Peeche</button>' : '<div class="tot">Step 1 / 3</div>'}<button class="btn" id="wizGo" onclick="wizNext(1)">${s < 3 ? 'Aage →' : 'Shuru Karein ✓'}</button>`;
   const old = $('#fab'); if (old) old.remove(); document.body.appendChild(sb);
@@ -611,7 +614,7 @@ function vBills(q) {
   if (q.f) BILLF = q.f;
   hdr('Bills & Entries', { right: searchBtn() });
   const match = v => BILLF === 'all' ? ['sale', 'purchase', 'sret', 'pret', 'quote', 'payin', 'payout'].includes(v.type) : BILLF === 'ret' ? (v.type === 'sret' || v.type === 'pret') : BILLF === 'pay' ? (v.type === 'payin' || v.type === 'payout') : v.type === BILLF;
-  const list = S.vouchers.filter(match).sort(vSort);
+  const list = S.vouchers.filter(v => match(v) && canSeeV(v)).sort(vSort);
   const tot = list.reduce((s, v) => s + vAmount(v), 0);
   $('#main').innerHTML = `<div class="chips">${BILL_FILTERS.map(([k, l]) => `<button class="chip ${k === BILLF ? 'on' : ''}" onclick="BILLF='${k}';go('bill?f=${k}')">${l}</button>`).join('')}</div>
   ${BILLF !== 'all' && list.length ? `<div class="mu" style="margin:0 4px 8px;font-size:13px">${list.length} entries · Total ${inr(tot)}</div>` : ''}
@@ -627,7 +630,7 @@ function newMenu() {
 let STOCKF = 'all';
 function itemRow(i, C) {
   const st = C.stock.get(i.id) || 0; const low = num(i.lowStock) > 0 && st <= num(i.lowStock);
-  return `<div class="row" onclick="go('item/${i.id}')"><div class="av">${esc(initials(i.name))}</div><div class="m"><div class="t">${esc(i.name)}</div><div class="s">${i.type === 'raw' ? 'Raw' : 'Finished'}${i.category ? ' · ' + esc(i.category) : ''} · ${i.type === 'raw' ? 'Purchase ' + inr(i.purchaseRate) : 'Sale ' + inr(i.saleRate)}</div></div><div class="rt"><div class="a ${st < 0 ? 'rd' : low ? 'wr' : ''}">${qf(st)} ${esc(i.unit)}</div>${low ? '<span class="tag w">Kam stock</span>' : `<div class="s mu" style="font-size:12px">${inr(st * num(i.purchaseRate))}</div>`}</div></div>`;
+  return `<div class="row" onclick="go('item/${i.id}')"><div class="av">${esc(initials(i.name))}</div><div class="m"><div class="t">${esc(i.name)}</div><div class="s">${i.type === 'raw' ? 'Raw' : 'Finished'}${i.category ? ' · ' + esc(i.category) : ''} · ${i.type === 'raw' && can('cost') ? 'Purchase ' + inr(i.purchaseRate) : 'Sale ' + inr(i.saleRate)}</div></div><div class="rt"><div class="a ${st < 0 ? 'rd' : low ? 'wr' : ''}">${qf(st)} ${esc(i.unit)}</div>${low ? '<span class="tag w">Kam stock</span>' : can('cost') ? `<div class="s mu" style="font-size:12px">${inr(st * num(i.purchaseRate))}</div>` : ''}</div></div>`;
 }
 function vStock(q) {
   if (q.f) STOCKF = q.f;
@@ -635,7 +638,7 @@ function vStock(q) {
   hdr('Stock / Items', { right: searchBtn() });
   const list = S.items.filter(i => STOCKF === 'all' || (STOCKF === 'low' ? C.low.includes(i) : (i.type || 'finished') === STOCKF)).sort((a, b) => a.name.localeCompare(b.name));
   const val = S.items.reduce((s, i) => s + Math.max(0, C.stock.get(i.id) || 0) * num(i.purchaseRate), 0);
-  $('#main').innerHTML = `<div class="grid2"><div class="stat b"><div class="l">Total Items</div><div class="v">${S.items.length}</div></div><div class="stat g" onclick="go('r/stock')"><div class="l">Stock Value</div><div class="v">${inr(val)}</div></div></div>
+  $('#main').innerHTML = `<div class="grid2"><div class="stat b"><div class="l">Total Items</div><div class="v">${S.items.length}</div></div>${can('cost') ? `<div class="stat g" onclick="go('r/stock')"><div class="l">Stock Value</div><div class="v">${inr(val)}</div></div>` : `<div class="stat" style="cursor:default"><div class="l">Kam Stock</div><div class="v">${C.low.length}</div></div>`}</div>
   <div class="btns" style="margin-bottom:12px"><button class="btn sec" onclick="go('prod/new')">🏭 Production Entry</button><button class="btn ghost" onclick="go('r/stock')">Stock Report</button></div>
   <div class="chips">${[['all', 'Sab'], ['finished', 'Finished'], ['raw', 'Raw Material'], ['low', 'Kam Stock (' + C.low.length + ')']].map(([k, l]) => `<button class="chip ${k === STOCKF ? 'on' : ''}" onclick="go('stock?f=${k}')">${l}</button>`).join('')}</div>
   <div class="list">${list.length ? list.map(i => itemRow(i, C)).join('') : emptyBox('📦', S.items.length ? 'Is filter mein koi item nahi' : 'Koi item nahi', S.items.length ? '' : 'Apne products / raw material jodein', S.items.length ? '' : `<button class="btn" onclick="go('item/new')">+ Item Jodein</button>`)}</div>`;
@@ -652,7 +655,7 @@ function vItemForm(id, q) {
     const mv = [];
     S.vouchers.forEach(v => { const t = VT[v.type]; if (t.lines && t.stock) v.lines.forEach(l => { if (l.itemId === it.id) mv.push({ v, q: t.stock * num(l.qty) }); }); if (v.type === 'prod') { if (v.outItem === it.id) mv.push({ v, q: num(v.outQty) }); (v.lines || []).forEach(l => { if (l.itemId === it.id) mv.push({ v, q: -num(l.qty) }); }); } });
     mv.sort((a, b) => vSort(a.v, b.v));
-    hist = `<div class="grid2"><div class="stat ${st < 0 ? 'r' : 'b'}"><div class="l">Current Stock</div><div class="v" id="curStock">${qf(st)} ${esc(it.unit)}</div></div><div class="stat"><div class="l">Stock Value</div><div class="v">${inr(st * num(it.purchaseRate))}</div></div></div>
+    hist = `<div class="grid2"><div class="stat ${st < 0 ? 'r' : 'b'}"><div class="l">Current Stock</div><div class="v" id="curStock">${qf(st)} ${esc(it.unit)}</div></div>${can('cost') ? `<div class="stat"><div class="l">Stock Value</div><div class="v">${inr(st * num(it.purchaseRate))}</div></div>` : ''}</div>
     <div class="sect">Stock Movement</div><div class="list">${mv.length ? mv.slice(0, 50).map(m => `<div class="row" onclick="go('v/${m.v.id}')"><div class="m"><div class="t">${esc(VT[m.v.type].hi)} · ${esc(m.v.no)}</div><div class="s">${fd(m.v.date)} · ${esc(vParty(m.v))}</div></div><div class="rt a ${m.q < 0 ? 'rd' : 'gr'}">${m.q > 0 ? '+' : ''}${qf(m.q)}</div></div>`).join('') : emptyBox('📭', 'Abhi koi movement nahi', '')}</div>`;
   }
   $('#main').innerHTML = `${hist}<div class="sect">${isNew ? 'Item Details' : 'Edit Item'}</div><div class="card">
@@ -872,12 +875,12 @@ function updTotals() {
 function pickParty(kind, cb) {
   const C = compute();
   const list = S.parties.filter(p => !kind || p.kind === 'both' || p.kind === kind).sort((a, b) => a.name.localeCompare(b.name)).map(p => ({ id: p.id, label: p.name, sub: [p.phone, p.gstin].filter(Boolean).join(' · '), right: `<div class="a" style="font-size:13px">${balTxt(C.bal.get(p.id) || 0)}</div>` }));
-  picker({ title: kind === 'supp' ? 'Supplier Chunein' : 'Customer Chunein', list, empty: 'Koi party nahi — nayi jodein', addLabel: 'Nayi Party Jodein', onPick: x => cb(party(x.id)), onAdd: qq => { window.PENDING_PARTY_CB = cb; go(`partyf/new?ret=1&kind=${kind || 'cust'}&name=${encodeURIComponent(qq || '')}`); } });
+  picker({ title: kind === 'supp' ? 'Supplier Chunein' : 'Customer Chunein', list, empty: 'Koi party nahi — nayi jodein', addLabel: can('masters') ? 'Nayi Party Jodein' : '', onPick: x => cb(party(x.id)), onAdd: qq => { window.PENDING_PARTY_CB = cb; go(`partyf/new?ret=1&kind=${kind || 'cust'}&name=${encodeURIComponent(qq || '')}`); } });
 }
 function pickItem(type, cb, addType) {
   const C = compute();
   const list = S.items.filter(i => !type || (i.type || 'finished') === type).sort((a, b) => a.name.localeCompare(b.name)).map(i => ({ id: i.id, label: i.name, sub: `${inr(i.saleRate)} · GST ${num(i.gst)}%${i.hsn ? ' · HSN ' + i.hsn : ''}`, right: `<div class="a" style="font-size:13px">${qf(C.stock.get(i.id) || 0)} ${esc(i.unit)}</div>` }));
-  picker({ title: 'Item Chunein', list, empty: 'Koi item nahi — naya jodein', addLabel: 'Naya Item Jodein', onPick: x => cb(item(x.id)), onAdd: qq => { window.PENDING_ITEM_CB = cb; go(`item/new?ret=1&type=${addType || type || 'finished'}&name=${encodeURIComponent(qq || '')}`); } });
+  picker({ title: 'Item Chunein', list, empty: 'Koi item nahi — naya jodein', addLabel: can('masters') ? 'Naya Item Jodein' : '', onPick: x => cb(item(x.id)), onAdd: qq => { window.PENDING_ITEM_CB = cb; go(`item/new?ret=1&type=${addType || type || 'finished'}&name=${encodeURIComponent(qq || '')}`); } });
 }
 async function stockWarn(needs, oldV) {
   // needs: Map itemId->qty going out; returns true if ok to proceed
@@ -1219,7 +1222,7 @@ function exportReport(name) {
 function vSettings() {
   hdr('Settings', { back: true });
   const c = co();
-  $('#main').innerHTML = `<div class="sect">Business Details</div><div class="card">
+  $('#main').innerHTML = `<div class="sect">Business Details${can('company') ? '' : ' <span class="tag x">sirf Owner badal sakta hai</span>'}</div><div class="card" id="bizCard">
   <div class="f"><label>Logo</label><div style="display:flex;gap:12px;align-items:center">${c.logo ? `<img class="logo-prev" src="${c.logo}" alt="logo">` : '<div class="logo-prev" style="display:grid;place-items:center;color:#aaa">Logo</div>'}<label class="btn sec sm" style="margin:0">Upload<input type="file" accept="image/*" hidden onchange="pickLogo(this,async()=>{co().logo=LOGO_TMP;await saveSettings();toast('Logo save ✓');render()})"></label>${c.logo ? `<button class="btn ghost sm" onclick="co().logo='';saveSettings().then(render)">Hatayein</button>` : ''}</div></div>
   <div class="f"><label>Business Naam</label><input id="s_name" value="${esc(c.name)}"></div>
   <div class="f2"><div class="f"><label>Phone</label><input id="s_phone" value="${esc(c.phone)}"></div><div class="f"><label>Email</label><input id="s_email" value="${esc(c.email)}"></div></div>
@@ -1232,12 +1235,14 @@ function vSettings() {
   <button class="btn full" id="s_save">Details Save Karein</button></div>
   <div class="sect">Security</div><div class="card"><div class="kv"><span>App PIN Lock</span><b id="pinState">${S.settings.pin ? 'ON 🔒' : 'OFF'}</b></div>
   <div class="btns" style="margin-top:10px">${S.settings.pin ? `<button class="btn sec" onclick="lockScreen('set1')">PIN Badlein</button><button class="btn dan" onclick="removePin()">PIN Hatayein</button>` : `<button class="btn sec" id="setPinBtn" onclick="lockScreen('set1')">4-digit PIN Lagayein</button>`}</div></div>
-  <div class="sect">Backup & Restore</div><div class="card"><p class="mu" style="margin:0 0 10px;font-size:13px">Saara data sirf is phone mein hai. Har hafte backup download karke Google Drive / WhatsApp par safe rakhein.</p>
-  <div class="btns"><button class="btn" onclick="backup()">⬇ Backup Download</button><label class="btn ghost" style="margin:0">⬆ Restore<input type="file" accept=".json,application/json" hidden onchange="restore(this)"></label></div></div>
-  <div class="sect">Cloud</div><div class="card"><div class="kv"><span>☁️ Cloud sync / multi-user</span><span class="tag w">Coming in v2</span></div><p class="mu" style="font-size:12.5px;margin:6px 0 0">Abhi ye app offline, ek device par chalta hai.</p></div>
-  <div class="sect">Danger Zone</div><div class="card"><button class="btn dan full" onclick="resetAll()">Saara Data Delete Karein</button></div>
-  <p class="mu" style="text-align:center;font-size:12px">Business ERP v1.0 · Offline · Data on device</p>`;
+  <div class="sect">Cloud / Login</div>${cloudCardHTML()}
+  <div class="sect">Backup & Restore</div><div class="card"><p class="mu" style="margin:0 0 10px;font-size:13px">${clOn() ? 'Data phone aur cloud dono mein hai. Phir bhi har mahine backup download karke safe rakhein.' : 'Saara data sirf is phone mein hai. Har hafte backup download karke Google Drive / WhatsApp par safe rakhein.'}</p>
+  <div class="btns">${ROLE() !== 'viewer' || !clOn() ? `<button class="btn" onclick="backup()">⬇ Backup Download</button>` : ''}${can('restore') ? `<label class="btn ghost" style="margin:0" id="restoreBtn">⬆ Restore<input type="file" accept=".json,application/json" hidden onchange="restore(this)"></label>` : ''}</div></div>
+  ${can('reset') ? `<div class="sect">Danger Zone</div><div class="card"><button class="btn dan full" onclick="resetAll()">Saara Data Delete Karein${clOn() ? ' (cloud se bhi)' : ''}</button></div>` : ''}
+  <p class="mu" style="text-align:center;font-size:12px">Business ERP v2.0 · ${clOn() ? 'Cloud Sync ON' : 'Offline · Data on device'}</p>`;
+  if (CL.cfg && CL.cfg.role === 'owner') loadStaff();
   $('#s_save').onclick = async () => {
+    if (!can('company')) return denyToast();
     const n = {}; $$('[id^=s_]').forEach(el => { if (el.tagName !== 'BUTTON') n[el.id.slice(2)] = el.value.trim(); });
     if (!n.name) return toast('Business naam zaroori hai'); n.gstin = n.gstin.toUpperCase(); if (n.gstin && !GSTIN_RE.test(n.gstin)) return toast('GSTIN sahi nahi lag raha');
     n.openCash = num(n.openCash); Object.assign(S.settings.company, n); await saveSettings(); dirty(); toast('Settings save ✓');
@@ -1254,14 +1259,20 @@ function restore(inp) {
     let d; try { d = JSON.parse(rd.result); } catch (e) { return toast('File sahi JSON nahi hai'); }
     if (!d || d.app !== 'erp-pwa' || !Array.isArray(d.items) || !Array.isArray(d.parties) || !Array.isArray(d.vouchers) || !d.settings) return toast('Ye is app ka backup nahi hai');
     if (!(await ask(`Restore karne se abhi ka saara data hat jayega aur backup (${d.items.length} items, ${d.parties.length} parties, ${d.vouchers.length} entries) aa jayega. Aage badhein?`, { ok: 'Restore', danger: true }))) { inp.value = ''; return; }
+    if (clOn() && !can('restore')) return denyToast();
+    const old = {}; for (const s of SYNC_COLS) old[s] = S[s].map(x => x.id);
+    if (clOn()) { const t = Date.now(); for (const s of SYNC_COLS) d[s].forEach(r => r.updatedAt = t); d.settings.updatedAt = t; d.settings.pin = S.settings.pin || ''; }
     for (const s of ['items', 'parties', 'vouchers']) { await DB.clear(s); await DB.bulk(s, d[s]); }
-    await DB.put('kv', d.settings, 'settings'); await loadAll(); toast('Restore ho gaya ✓'); replaceTo('home');
+    await DB.put('kv', d.settings, 'settings'); await loadAll();
+    if (clOn()) { for (const s of SYNC_COLS) { const keep = new Set(d[s].map(x => x.id)); for (const id of old[s]) if (!keep.has(id)) await clPushDel(s, id); for (const r of d[s]) await clPushRec(s, r); } await clPushSettings(); }
+    toast('Restore ho gaya ✓'); replaceTo('home');
   };
   rd.readAsText(f);
 }
 async function resetAll() {
   if (!(await ask('Saara data (items, parties, bills) hamesha ke liye delete ho jayega. Pehle backup le liya?', { ok: 'Haan, Delete', danger: true }))) return;
   if (!(await ask('Pakka? Ye wapas nahi aayega.', { ok: 'Delete Karo', danger: true }))) return;
+  if (clOn()) { if (!can('reset')) return denyToast(); for (const s of SYNC_COLS) for (const r of S[s]) await clPushDel(s, r.id); for (const s of SYNC_COLS) await DB.clear(s); const keep = { ...DEF_SETTINGS(), updatedAt: Date.now() }; await DB.put('kv', keep, 'settings'); await loadAll(); await clPushSettings(); toast('Data delete ho gaya (cloud se bhi)'); return replaceTo('home'); }
   for (const s of ['items', 'parties', 'vouchers', 'kv']) await DB.clear(s);
   await loadAll(); toast('Data delete ho gaya'); replaceTo('home');
 }
@@ -1289,11 +1300,409 @@ async function pinKey(k) {
 function pinCancel() { $('#lock').classList.remove('on'); $('#lock').innerHTML = ''; }
 async function removePin() { if (!(await ask('PIN lock hatana hai?', { ok: 'Hatayein' }))) return; S.settings.pin = ''; await saveSettings(); toast('PIN hata diya'); render(); }
 
+
+/* ================= Cloud sync + Staff login (v2) ================= */
+const FB_CFG = { apiKey: "AIzaSyBuG7ZWKH74-cOejWzw8N_X-PoEn61Tvus", authDomain: "qr-menu-f5e9a.firebaseapp.com", databaseURL: "https://qr-menu-f5e9a-default-rtdb.firebaseio.com", projectId: "qr-menu-f5e9a", appId: "1:613360886334:web:ae1a322f2a470c2644276f" };
+const FB_VER = '10.12.2';
+const SYNC_COLS = ['items', 'parties', 'vouchers'];
+const ROLES = { owner: 'Owner (Malik)', manager: 'Manager', billing: 'Billing Staff', viewer: 'Viewer (sirf dekhna)' };
+const ROLE_INFO = { owner: 'Sab kuch', manager: 'Sab kuch, staff/company settings/restore chhodkar', billing: 'Sirf Bikri Bill + Quotation, items/parties dekh sakte hain, reports nahi', viewer: 'Sirf dekh sakte hain, kuch badal nahi sakte' };
+const CL = { cfg: null, q: {}, tombs: {}, online: navigator.onLine, connected: false, user: null, app: null, db: null, auth: null, subs: [], inflight: new Set(), denied: false, sdk: 'none', started: false, chain: Promise.resolve(), renderT: 0 };
+const clOn = () => !!(CL.cfg && CL.cfg.cid);
+const ROLE = () => clOn() ? (CL.cfg.role || 'viewer') : 'owner';
+function can(x) {
+  const r = ROLE();
+  if (r === 'owner') return true;
+  switch (x) {
+    case 'write': return r !== 'viewer';
+    case 'masters': case 'delete': return r === 'manager';
+    case 'reports': case 'cost': case 'exp': return r === 'manager' || r === 'viewer';
+    case 'staff': case 'company': case 'restore': case 'reset': return false;
+    default: return false;
+  }
+}
+function canV(type) { const r = ROLE(); if (r === 'owner' || r === 'manager') return true; if (r === 'billing') return type === 'sale' || type === 'quote'; return false; }
+function canSeeV(v) { return ROLE() !== 'billing' || !['purchase', 'pret', 'payout', 'exp'].includes(v.type); }
+function routeAllowed(a, b) {
+  switch (a) {
+    case 'new': case 'pay': return canV(b);
+    case 'edit': { const v = vch(b); return !v || canV(v.type); }
+    case 'v': { const v = vch(b); return !v || canSeeV(v); }
+    case 'exp': return b === 'new' ? canV('exp') : can('exp');
+    case 'prod': return b === 'new' ? canV('prod') : true;
+    case 'item': case 'partyf': return b !== 'new' || can('masters');
+    case 'reports': return can('reports');
+    case 'r': return can('reports');
+    default: return true;
+  }
+}
+function canSave(store, rec) {
+  if (!clOn()) return true;
+  if (!can('write')) return false;
+  if (store === 'vouchers') return canV(rec.type);
+  return can('masters');
+}
+function denyToast() { toast('Aapke role (' + ROLES[ROLE()] + ') mein ye allowed nahi'); }
+
+/* Hide / disable UI the current role can't use */
+function applyRole() {
+  const r = ROLE(); document.body.dataset.role = r;
+  if (r === 'owner') return;
+  $$('[onclick]').forEach(el => {
+    const oc = el.getAttribute('onclick') || '';
+    let hide = false;
+    const m = oc.match(/go\('([^']+)'\)/);
+    if (m && !oc.includes('BILLF')) { const [path] = m[1].split('?'); const [a, b] = path.split('/'); if (!routeAllowed(a, b)) hide = true; }
+    if (/\bdel(V|Item|Party)\(/.test(oc) && !can('delete')) hide = true;
+    if (/resetAll\(/.test(oc) && !can('reset')) hide = true;
+    if (hide) el.style.display = 'none';
+  });
+  const fab = $('#fab.fab');
+  if (fab) { const src = String(fab.onclick || ''); const m = src.match(/go\('([^']+)'\)/); if (!can('write') || (m && !routeAllowed(...m[1].split('?')[0].split('/')))) fab.remove(); else if (/newMenu/.test(src) && r === 'billing') { /* menu rows filtered above */ } }
+  const { parts } = parseHash(); const [a, b] = parts;
+  const ro = ((a === 'item' || a === 'partyf') && !can('masters')) || ((a === 'edit' || a === 'new') && !canV((vch(b) || {}).type || b));
+  if (ro) { $$('#main input, #main select, #main textarea').forEach(e => e.disabled = true); $$('#main .seg button').forEach(e => e.disabled = true); const sb = $('.savebar'); if (sb) sb.remove(); $$('#main .btn.dan').forEach(e => e.style.display = 'none'); }
+  if (a === 'settings' && !can('company')) { $$('#bizCard input, #bizCard select, #bizCard textarea').forEach(e => e.disabled = true); $$('#bizCard .btn, #bizCard label.btn').forEach(e => e.style.display = 'none'); }
+  if (!can('cost')) { const pr = $('#i_purchaseRate'); if (pr) pr.closest('.f').style.display = 'none'; }
+}
+
+/* ---------- SDK ---------- */
+function loadScript(src) { return new Promise((res, rej) => { const s = document.createElement('script'); s.src = src; s.onload = res; s.onerror = () => rej(new Error('load')); document.head.appendChild(s); }); }
+async function loadFB() {
+  if (window.firebase && window.firebase.initializeApp && window.firebase.auth && window.firebase.database) return;
+  const b = `https://www.gstatic.com/firebasejs/${FB_VER}/`;
+  await loadScript(b + 'firebase-app-compat.js'); await loadScript(b + 'firebase-auth-compat.js'); await loadScript(b + 'firebase-database-compat.js');
+}
+function fbInit() {
+  if (CL.app) return;
+  const ex = (firebase.apps || []).find(a => a.name === '[DEFAULT]');
+  CL.app = ex || firebase.initializeApp(FB_CFG); CL.auth = CL.app.auth(); CL.db = CL.app.database();
+}
+const isDenied = e => !!e && /permission[_ ]denied/i.test((e.code || '') + ' ' + (e.message || ''));
+function authMsg(e) {
+  const c = (e && e.code) || '';
+  if (c.includes('operation-not-allowed')) return 'Firebase mein Email/Password login ON nahi hai. Console → Authentication → Sign-in method → Email/Password enable karein.';
+  if (c.includes('email-already-in-use')) return 'Is email ka account pehle se hai. Login karein ya dusra email use karein.';
+  if (c.includes('invalid-email')) return 'Email sahi nahi hai.';
+  if (c.includes('weak-password')) return 'Password kam se kam 6 akshar ka rakhein.';
+  if (c.includes('wrong-password') || c.includes('invalid-credential') || c.includes('user-not-found') || c.includes('invalid-login')) return 'Email ya password galat hai.';
+  if (c.includes('network')) return 'Internet nahi hai. Net on karke dobara try karein.';
+  if (c.includes('too-many-requests')) return 'Bahut zyada try hua. Thodi der baad karein.';
+  if (isDenied(e)) return 'Cloud rules abhi publish nahi hui. Firebase console mein rules publish karein.';
+  return 'Kuch gadbad hui: ' + (e && (e.message || c) || '');
+}
+
+/* ---------- local state ---------- */
+async function clSaveCfg() { await DB.put('kv', CL.cfg, 'cloud'); }
+async function clSaveQ() { await DB.put('kv', CL.q, 'syncq'); }
+async function clSaveTombs() { await DB.put('kv', CL.tombs, 'tombs'); }
+function settingsPayload() { const s = { ...S.settings }; delete s.pin; return { updatedAt: S.settings.updatedAt || Date.now(), j: JSON.stringify(s) }; }
+async function clPush(col, id, payload) {
+  if (!clOn() && !(CL.cfg && CL.cfg.pendingCreate)) return;
+  CL.q[col + '/' + id] = payload; await clSaveQ(); clFlush(); clStatus();
+}
+function clPushRec(store, rec) { return clPush(store, rec.id, { updatedAt: rec.updatedAt, j: JSON.stringify(rec) }); }
+async function clPushDel(store, id) {
+  if (!clOn()) return; const t = Date.now(); CL.tombs[store + '/' + id] = t; await clSaveTombs();
+  return clPush(store, id, { updatedAt: t, deleted: true });
+}
+function clPushSettings() { if (clOn()) return clPush('settings', 'main', settingsPayload()); }
+
+function clFlush() {
+  if (!clOn() || !CL.db || !CL.user || !CL.connected || (CL.cfg && CL.cfg.pendingCreate)) return;
+  Object.keys(CL.q).forEach(key => {
+    if (CL.inflight.has(key)) return;
+    const payload = CL.q[key]; CL.inflight.add(key);
+    CL.db.ref(`erp/${CL.cfg.cid}/data/${key}`).set(payload).then(async () => {
+      CL.denied = false; if (CL.q[key] === payload) { delete CL.q[key]; await clSaveQ(); }
+    }).catch(e => { if (isDenied(e)) CL.denied = true; else console.warn('sync', e && e.code); })
+      .finally(() => { CL.inflight.delete(key); clStatus(); if (CL.q[key] && CL.q[key] !== payload && !CL.denied) clFlush(); });
+  });
+  clStatus();
+}
+
+/* ---------- status ---------- */
+function clState() {
+  if (!CL.cfg) return { k: 'off', t: 'Cloud OFF', c: 'x' };
+  const n = Object.keys(CL.q).length;
+  if (CL.denied) return { k: 'rules', t: 'Rules publish nahi hui', c: 'r', n };
+  if (!CL.online || CL.sdk === 'fail') return { k: 'offline', t: 'Offline' + (n ? ' · ' + n + ' pending' : ''), c: 'w', n };
+  if (CL.started && !CL.user && CL.sdk === 'ok') return { k: 'login', t: 'Login karein', c: 'w', n };
+  if (!CL.connected) return { k: 'offline', t: 'Offline' + (n ? ' · ' + n + ' pending' : ''), c: 'w', n };
+  if (n) return { k: 'pending', t: 'Pending ' + n, c: 'w', n };
+  return { k: 'synced', t: 'Synced ✓', c: 'g', n };
+}
+function syncChip() { const s = clState(); return `<span id="syncChip" class="tag ${s.c}" data-k="${s.k}" onclick="go('settings')" style="cursor:pointer;margin-right:4px;font-size:10.5px">☁ ${esc(s.t)}</span>`; }
+function clStatus() {
+  const s = clState(); const ch = $('#syncChip');
+  if (ch) { ch.className = 'tag ' + s.c; ch.dataset.k = s.k; ch.textContent = '☁ ' + s.t; }
+  const cs = $('#cloudStatus'); if (cs) { cs.className = 'tag ' + s.c; cs.dataset.k = s.k; cs.textContent = s.t; }
+  const rm = $('#rulesMsg'); if (rm) rm.style.display = s.k === 'rules' ? 'block' : 'none';
+}
+window.addEventListener('online', () => { CL.online = true; clStatus(); if (CL.cfg) clStart(); });
+window.addEventListener('offline', () => { CL.online = false; clStatus(); });
+
+/* ---------- remote merge (last write wins) ---------- */
+function localU(col, id) {
+  if (col === 'settings') return S.settings.updatedAt || 0;
+  const r = S[col].find(x => x.id === id); const t = CL.tombs[col + '/' + id] || 0;
+  return Math.max(r ? (r.updatedAt || 0) : 0, t);
+}
+function applyRemote(col, id, val) {
+  CL.chain = CL.chain.then(async () => {
+    if (!val || typeof val.updatedAt !== 'number') return;
+    if (col !== 'settings' && !SYNC_COLS.includes(col)) return;
+    if (val.updatedAt <= localU(col, id)) return;
+    const qk = col + '/' + id; if (CL.q[qk] && CL.q[qk].updatedAt >= val.updatedAt) return;
+    if (col === 'settings') {
+      if (val.deleted) return;
+      let s; try { s = JSON.parse(val.j); } catch (e) { return; }
+      S.settings = { ...DEF_SETTINGS(), ...s, pin: S.settings.pin || '', updatedAt: val.updatedAt };
+      await DB.put('kv', S.settings, 'settings');
+    } else if (val.deleted) {
+      await DB.del(col, id); S[col] = S[col].filter(x => x.id !== id); CL.tombs[qk] = val.updatedAt; await clSaveTombs();
+    } else {
+      let rec; try { rec = JSON.parse(val.j); } catch (e) { return; }
+      rec.updatedAt = val.updatedAt; rec.id = id; await DB.put(col, rec);
+      const arr = S[col]; const i = arr.findIndex(x => x.id === id); if (i >= 0) arr[i] = rec; else arr.push(rec);
+      if (CL.tombs[qk]) { delete CL.tombs[qk]; await clSaveTombs(); }
+    }
+    dirty(); clRerender();
+  }).catch(e => console.warn('merge', e));
+  return CL.chain;
+}
+function clRerender() {
+  clearTimeout(CL.renderT);
+  CL.renderT = setTimeout(() => {
+    const { parts } = parseHash(); const [a, b] = parts;
+    if ($('#ov').classList.contains('on')) return;
+    if (!S.settings.setupDone || (a === 'setup')) return render();
+    const safe = ['home', 'bill', 'stock', 'party', 'more', 'v', 'p', 'reports', 'r'].includes(a) || ((a === 'exp' || a === 'prod') && b !== 'new');
+    if (safe) render();
+  }, 250);
+}
+
+/* ---------- start / attach ---------- */
+function clDetach() { CL.subs.forEach(f => { try { f(); } catch (e) { } }); CL.subs = []; CL.attached = null; if (CL.authUnsub) { try { CL.authUnsub(); } catch (e) { } CL.authUnsub = null; } }
+function sub(ref, ev, cb, err) { const h = ref.on(ev, cb, err); CL.subs.push(() => ref.off(ev, h)); }
+async function clStart() {
+  if (!CL.cfg) return;
+  try { await loadFB(); CL.sdk = 'ok'; } catch (e) { CL.sdk = 'fail'; clStatus(); return; }
+  fbInit();
+  if (CL.started) { clFlush(); clStatus(); return; }
+  CL.started = true;
+  sub(CL.db.ref('.info/connected'), 'value', s => { CL.connected = !!s.val(); clStatus(); if (CL.connected) { if (CL.cfg && CL.cfg.pendingCreate && CL.user) clAttach(); else clFlush(); } });
+  if (CL.authUnsub) CL.authUnsub();
+  CL.authUnsub = CL.auth.onAuthStateChanged(u => {
+    CL.user = u || null; clStatus();
+    if (u && CL.cfg && u.uid === CL.cfg.uid) clAttach();
+  });
+}
+let ATTACHING = false;
+async function clAttach() {
+  if (ATTACHING || !CL.cfg) return;
+  if (CL.attached === CL.cfg.cid && !CL.cfg.pendingCreate) { clFlush(); return; }
+  ATTACHING = true;
+  try {
+    const c = CL.cfg;
+    if (c.pendingCreate) { const ok = await createCompany(); if (!ok) return; }
+    CL.subs.splice(1).forEach(f => { try { f(); } catch (e) { } }); // keep .info/connected (first sub)
+    const base = CL.db.ref(`erp/${c.cid}`);
+    const onErr = e => { if (isDenied(e)) { CL.denied = true; clStatus(); } };
+    sub(base.child(`members/${c.uid}`), 'value', async s => {
+      const m = s.val(); CL.denied = false;
+      if (!m) { await clRemoved(); return; }
+      if (m.role !== c.role || m.name !== c.name) { c.role = m.role; c.name = m.name || c.name; await clSaveCfg(); render(); }
+      clStatus();
+    }, onErr);
+    if (!c.inited) { const ok = await initialSync(); if (!ok) return; }
+    for (const col of [...SYNC_COLS, 'settings']) {
+      const r = base.child(`data/${col}`);
+      sub(r, 'child_added', s => applyRemote(col, s.key, s.val()), onErr);
+      sub(r, 'child_changed', s => applyRemote(col, s.key, s.val()), onErr);
+    }
+    CL.attached = c.cid; clFlush();
+  } finally { ATTACHING = false; clStatus(); }
+}
+async function createCompany() {
+  const c = CL.cfg; const up = {};
+  up[`erp/${c.cid}/owner`] = c.uid;
+  up[`erp/${c.cid}/info`] = { name: c.company || co().name || 'Business', createdAt: Date.now() };
+  up[`erp/${c.cid}/members/${c.uid}`] = { role: 'owner', email: c.email, name: c.name || '' };
+  up[`erpUsers/${c.uid}`] = c.cid;
+  try { await CL.db.ref().update(up); c.pendingCreate = false; CL.denied = false; await clSaveCfg(); return true; }
+  catch (e) { if (isDenied(e)) CL.denied = true; else console.warn('create', e && e.code); clStatus(); return false; }
+}
+async function initialSync() {
+  const c = CL.cfg; const base = CL.db.ref(`erp/${c.cid}/data`);
+  try {
+    for (const col of [...SYNC_COLS, 'settings']) {
+      const snap = await base.child(col).once('value'); const remote = snap.val() || {};
+      if (c.uploadLocal !== false) {
+        if (col === 'settings') { const r = remote.main; if (S.settings.setupDone && (!r || (S.settings.updatedAt || 0) > r.updatedAt)) { if (!S.settings.updatedAt) S.settings.updatedAt = Date.now(); await DB.put('kv', S.settings, 'settings'); CL.q['settings/main'] = settingsPayload(); } }
+        else S[col].forEach(rec => { const r = remote[rec.id]; if (!rec.updatedAt) rec.updatedAt = Date.now(); if (!r || rec.updatedAt > r.updatedAt) CL.q[col + '/' + rec.id] = { updatedAt: rec.updatedAt, j: JSON.stringify(rec) }; });
+      }
+      for (const [id, val] of Object.entries(remote)) await applyRemote(col, id, val);
+    }
+    await clSaveQ(); c.inited = true; delete c.uploadLocal; CL.denied = false; await clSaveCfg(); return true;
+  } catch (e) { if (isDenied(e)) CL.denied = true; else console.warn('init', e && e.code); clStatus(); return false; }
+}
+async function clRemoved() {
+  clDetach(); try { await CL.auth.signOut(); } catch (e) { }
+  CL.cfg = null; CL.q = {}; CL.started = false; await DB.del('kv', 'cloud'); await clSaveQ();
+  await ask('Owner ne aapko company se hata diya hai. Cloud sync band ho gaya. (Phone ka local data abhi bhi hai)', { ok: 'Theek hai', cancel: 'Band karein' });
+  render();
+}
+
+/* ---------- Owner signup / login / logout ---------- */
+function cloudSheet(mode) {
+  const signup = mode === 'signup';
+  sheet(signup ? 'Company Banayein (Owner)' : 'Cloud Login (Owner / Staff)', `
+  ${signup ? `<div class="f"><label>Aapka Naam</label><input id="cl_name" placeholder="e.g. Ramesh Sharma"></div>` : ''}
+  <div class="f"><label>Email</label><input id="cl_email" type="email" autocomplete="username" placeholder="aap@gmail.com"></div>
+  <div class="f"><label>Password ${signup ? '(kam se kam 6 akshar)' : ''}</label><input id="cl_pw" type="password" autocomplete="${signup ? 'new-password' : 'current-password'}"></div>
+  <p class="mu" style="font-size:12.5px;margin:0">${signup ? 'Ek nayi company banegi aur is phone ka saara data cloud par upload ho jayega. Phir aap staff jod sakte hain.' : 'Owner ya staff — jo email/password aapko mila hai wahi daalein.'}</p>
+  <div id="cl_err" class="rd" style="font-size:13px;margin-top:8px"></div>`,
+    `<button class="btn full" id="cl_go">${signup ? 'Company Banayein' : 'Login Karein'}</button>`);
+  $('#cl_go').onclick = () => signup ? clSignup() : clLogin();
+}
+function clErr(m) { const e = $('#cl_err'); if (e) e.textContent = m; else toast(m); }
+async function clSignup() {
+  const name = $('#cl_name').value.trim(), email = $('#cl_email').value.trim().toLowerCase(), pw = $('#cl_pw').value;
+  if (!email || !pw) return clErr('Email aur password dono daalein'); if (pw.length < 6) return clErr('Password kam se kam 6 akshar ka rakhein');
+  const btn = $('#cl_go'); btn.disabled = true; btn.textContent = 'Ruk jaiye...';
+  try { await loadFB(); CL.sdk = 'ok'; } catch (e) { btn.disabled = false; btn.textContent = 'Company Banayein'; return clErr('Internet nahi hai. Net on karke try karein.'); }
+  fbInit();
+  let cred; try { cred = await CL.auth.createUserWithEmailAndPassword(email, pw); } catch (e) { btn.disabled = false; btn.textContent = 'Company Banayein'; return clErr(authMsg(e)); }
+  CL.cfg = { cid: 'c' + uid(), uid: cred.user.uid, email, name, role: 'owner', company: co().name || '', pendingCreate: true, inited: false };
+  await clSaveCfg(); CL.user = cred.user; closeOv();
+  await clStart(); await clAttach();
+  toast(CL.denied ? 'Account ban gaya. Rules publish hone ke baad sync shuru hoga.' : 'Company ban gayi ✓ Data upload ho raha hai');
+  render();
+}
+async function clLogin() {
+  const email = $('#cl_email').value.trim().toLowerCase(), pw = $('#cl_pw').value;
+  if (!email || !pw) return clErr('Email aur password dono daalein');
+  const btn = $('#cl_go'); btn.disabled = true; btn.textContent = 'Ruk jaiye...';
+  const reset = m => { btn.disabled = false; btn.textContent = 'Login Karein'; clErr(m); };
+  try { await loadFB(); CL.sdk = 'ok'; } catch (e) { return reset('Internet nahi hai. Net on karke try karein.'); }
+  fbInit();
+  let cred; try { cred = await CL.auth.signInWithEmailAndPassword(email, pw); } catch (e) { return reset(authMsg(e)); }
+  const u = cred.user;
+  try {
+    const cid = (await CL.db.ref(`erpUsers/${u.uid}`).once('value')).val();
+    if (!cid) { await CL.auth.signOut(); return reset('Ye account kisi company mein add nahi hai. Owner se kahiye aapko Staff mein jode.'); }
+    const m = (await CL.db.ref(`erp/${cid}/members/${u.uid}`).once('value')).val();
+    if (!m) { await CL.auth.signOut(); return reset('Aapko company se hata diya gaya hai.'); }
+    let company = ''; try { company = ((await CL.db.ref(`erp/${cid}/info`).once('value')).val() || {}).name || ''; } catch (e) { }
+    const hasLocal = S.items.length + S.parties.length + S.vouchers.length > 0;
+    let uploadLocal = true;
+    if (hasLocal && m.role !== 'owner') {
+      closeOv();
+      const replace = await ask(`Is phone par pehle se data hai (${S.items.length} items, ${S.parties.length} parties, ${S.vouchers.length} entries). <b>${esc(company || 'Company')}</b> ka cloud data aane se pehle local data hata dein?<br><br><b>Haan</b> = local hatao, sirf company ka data rakho<br><b>Nahi</b> = local data bhi company mein jud jayega`, { ok: 'Haan, hatao', cancel: 'Nahi, jodo' });
+      if (replace) { for (const s of SYNC_COLS) await DB.clear(s); const pin = S.settings.pin; S.settings = { ...DEF_SETTINGS(), pin }; await DB.put('kv', S.settings, 'settings'); await loadAll(); uploadLocal = false; }
+    }
+    CL.cfg = { cid, uid: u.uid, email, name: m.name || '', role: m.role, company, inited: false, uploadLocal };
+    await clSaveCfg(); CL.user = u; CL.denied = false; closeOv();
+    await clStart(); await clAttach();
+    toast(`Login ho gaya ✓ ${ROLES[m.role] || m.role}`); render();
+  } catch (e) {
+    if (isDenied(e)) { CL.denied = true; try { await CL.auth.signOut(); } catch (x) { } return reset('Cloud rules abhi publish nahi hui. Owner Firebase console mein rules publish kare, phir login karein.'); }
+    return reset(authMsg(e));
+  }
+}
+async function clLogout() {
+  const n = Object.keys(CL.q).length;
+  if (!(await ask(`Cloud se logout karna hai?${n ? `<br><br>⚠️ ${n} entries abhi cloud par nahi gayi hain — wo sirf is phone par rahengi.` : ''}<br>Phone ka local data rahega.`, { ok: 'Logout', danger: !!n }))) return;
+  clDetach(); try { if (CL.auth) await CL.auth.signOut(); } catch (e) { }
+  CL.cfg = null; CL.q = {}; CL.tombs = {}; CL.started = false; CL.denied = false; CL.user = null; CL.connected = false;
+  await DB.del('kv', 'cloud'); await clSaveQ(); await clSaveTombs(); toast('Logout ho gaya'); render();
+}
+async function clRetry() { CL.denied = false; clStatus(); if (!CL.cfg) return; await clStart(); if (CL.user && CL.user.uid === CL.cfg.uid) await clAttach(); else clStatus(); if (CL.denied) toast('Rules abhi bhi publish nahi hui'); else toast('Dobara try kiya'); }
+
+/* ---------- Staff management (owner) ---------- */
+let STAFF = null;
+async function loadStaff() {
+  const el = $('#staffList'); if (!el) return;
+  if (!CL.db || !CL.user) { el.innerHTML = '<div class="mu" style="font-size:13px">Staff list ke liye internet chahiye.</div>'; return; }
+  try {
+    const m = (await CL.db.ref(`erp/${CL.cfg.cid}/members`).once('value')).val() || {}; STAFF = m;
+    el.innerHTML = Object.entries(m).sort((a, b) => (a[1].role === 'owner' ? -1 : 0) - (b[1].role === 'owner' ? -1 : 0)).map(([id, x]) => `<div class="row" ${x.role === 'owner' ? 'style="cursor:default"' : `onclick="staffEdit('${id}')"`}><div class="av">${esc(initials(x.name || x.email))}</div><div class="m"><div class="t">${esc(x.name || x.email)}</div><div class="s">${esc(x.email)}</div></div><div class="rt"><span class="tag ${x.role === 'owner' ? 'g' : x.role === 'viewer' ? 'x' : ''}">${esc(ROLES[x.role] || x.role)}</span></div></div>`).join('');
+  } catch (e) { el.innerHTML = `<div class="rd" style="font-size:13px">${isDenied(e) ? 'Rules publish nahi hui — staff list nahi dikh sakti.' : 'Staff list load nahi hui.'}</div>`; if (isDenied(e)) { CL.denied = true; clStatus(); } }
+}
+const roleOpts = sel => ['manager', 'billing', 'viewer'].map(r => `<option value="${r}" ${r === sel ? 'selected' : ''}>${ROLES[r]} — ${ROLE_INFO[r]}</option>`).join('');
+function staffAdd() {
+  if (!can('staff')) return denyToast();
+  sheet('Naya Staff Jodein', `<div class="f"><label>Naam</label><input id="st_name" placeholder="e.g. Suresh"></div>
+  <div class="f"><label>Email (login ke liye)</label><input id="st_email" type="email" autocomplete="off"></div>
+  <div class="f"><label>Password (kam se kam 6 akshar)</label><input id="st_pw" type="text" autocomplete="off"></div>
+  <div class="f"><label>Role</label><select id="st_role">${roleOpts('billing')}</select></div>
+  <p class="mu" style="font-size:12.5px;margin:0">Ye email/password staff ko de dein. Wo apne phone par ERP kholkar Settings → Cloud Login se login karenge.</p>
+  <div id="cl_err" class="rd" style="font-size:13px;margin-top:8px"></div>`, `<button class="btn full" id="st_go">Staff Jodein</button>`);
+  $('#st_go').onclick = async () => {
+    const name = $('#st_name').value.trim(), email = $('#st_email').value.trim().toLowerCase(), pw = $('#st_pw').value, role = $('#st_role').value;
+    if (!name || !email || !pw) return clErr('Naam, email aur password teeno daalein'); if (pw.length < 6) return clErr('Password kam se kam 6 akshar ka rakhein');
+    if (!ROLES[role] || role === 'owner') return clErr('Role chunein');
+    const b = $('#st_go'); b.disabled = true; b.textContent = 'Ruk jaiye...';
+    const fail = m => { b.disabled = false; b.textContent = 'Staff Jodein'; clErr(m); };
+    let sec, suid;
+    try {
+      sec = (firebase.apps || []).find(a => a.name === 'erpsec') || firebase.initializeApp(FB_CFG, 'erpsec');
+      try { await sec.auth().setPersistence(firebase.auth.Auth.Persistence.NONE); } catch (e) { }
+      let cred;
+      try { cred = await sec.auth().createUserWithEmailAndPassword(email, pw); }
+      catch (e) { if (!String(e && e.code).includes('email-already-in-use')) throw e; try { cred = await sec.auth().signInWithEmailAndPassword(email, pw); } catch (x) { throw e; } }
+      suid = cred.user.uid;
+      try { await sec.auth().signOut(); } catch (e) { }
+    } catch (e) { return fail(authMsg(e)); }
+    try {
+      await CL.db.ref().update({ [`erp/${CL.cfg.cid}/members/${suid}`]: { role, email, name }, [`erpUsers/${suid}`]: CL.cfg.cid });
+    } catch (e) { if (isDenied(e)) { CL.denied = true; clStatus(); } return fail(isDenied(e) ? 'Staff company mein nahi jud paaya kyunki cloud rules abhi publish nahi hui. Rules publish karke isi email + password se dobara jodein.' : authMsg(e)); }
+    closeOv(); toast(`${name} jud gaye ✓ (${ROLES[role]})`); loadStaff();
+  };
+}
+function staffEdit(id) {
+  if (!can('staff')) return denyToast();
+  const x = STAFF && STAFF[id]; if (!x || x.role === 'owner') return;
+  sheet(esc(x.name || x.email), `<div class="kv"><span>Email</span><span>${esc(x.email)}</span></div>
+  <div class="f" style="margin-top:10px"><label>Role badlein</label><select id="se_role">${roleOpts(x.role)}</select></div><div id="cl_err" class="rd" style="font-size:13px"></div>`,
+    `<div class="btns"><button class="btn dan" id="se_del">Hatayein</button><button class="btn" id="se_save">Role Save</button></div>`);
+  $('#se_save').onclick = async () => { try { await CL.db.ref(`erp/${CL.cfg.cid}/members/${id}/role`).set($('#se_role').value); closeOv(); toast('Role badal gaya ✓'); loadStaff(); } catch (e) { clErr(authMsg(e)); } };
+  $('#se_del').onclick = async () => {
+    closeOv(); if (!(await ask(`${esc(x.name || x.email)} ko company se hatana hai? Unka cloud access turant band ho jayega.`, { ok: 'Hatayein', danger: true }))) return;
+    try { await CL.db.ref().update({ [`erp/${CL.cfg.cid}/members/${id}`]: null, [`erpUsers/${id}`]: null }); toast('Staff hata diya'); loadStaff(); } catch (e) { toast(authMsg(e)); }
+  };
+}
+
+/* ---------- Settings card ---------- */
+function cloudCardHTML() {
+  const s = clState();
+  const rules = `<div id="rulesMsg" class="card" style="display:${s.k === 'rules' ? 'block' : 'none'};background:var(--warnl);border:1px solid #fcd34d;margin:10px 0 0;padding:10px;font-size:13px">⚠️ <b>Cloud rules abhi publish nahi hui.</b> Aapka data is phone par safe hai aur app normal chalega. Owner Firebase console mein ERP rules publish kare — uske baad sync apne aap ho jayega.<div style="margin-top:8px"><button class="btn sm sec" onclick="clRetry()">Dobara Try Karein</button></div></div>`;
+  if (!CL.cfg) return `<div class="card" id="cloudCard"><div class="kv"><span>☁️ Cloud Sync</span><span class="tag x" id="cloudStatus" data-k="off">OFF</span></div>
+  <p class="mu" style="font-size:12.5px;margin:6px 0 10px">Optional hai. ON karne se data cloud par backup hoga, kai phones par chalega aur staff ko login de sakte hain. Bina cloud ke bhi app pehle jaisa offline chalta rahega.</p>
+  <div class="btns"><button class="btn" id="clSignupBtn" onclick="cloudSheet('signup')">Company Banayein (Owner)</button><button class="btn ghost" id="clLoginBtn" onclick="cloudSheet('login')">Login (Owner / Staff)</button></div></div>`;
+  const c = CL.cfg;
+  return `<div class="card" id="cloudCard"><div class="kv"><span>☁️ Status</span><span class="tag ${s.c}" id="cloudStatus" data-k="${s.k}">${esc(s.t)}</span></div>
+  <div class="kv"><span>Company</span><b>${esc(co().name || c.company || '—')}</b></div>
+  <div class="kv"><span>Login</span><span>${esc(c.email)}</span></div>
+  <div class="kv"><span>Aapka Role</span><b id="myRole">${esc(ROLES[c.role] || c.role)}</b></div>
+  ${rules}
+  <div class="btns" style="margin-top:10px"><button class="btn sec sm" onclick="clRetry()">🔄 Sync Now</button>${s.k === 'login' ? `<button class="btn sm" onclick="cloudSheet('login')">Login Karein</button>` : ''}<button class="btn ghost sm" id="clLogout" onclick="clLogout()">Logout</button></div></div>
+  ${c.role === 'owner' ? `<div class="sect">Staff (Team)</div><div class="card"><div class="list" id="staffList" style="margin:0 0 10px"><div class="mu" style="font-size:13px">Load ho raha hai...</div></div><button class="btn full" id="staffAddBtn" onclick="staffAdd()">+ Staff Jodein</button>
+  <p class="mu" style="font-size:12px;margin:8px 0 0">Roles: Manager = ${ROLE_INFO.manager}. Billing = ${ROLE_INFO.billing}. Viewer = ${ROLE_INFO.viewer}.</p></div>` : ''}`;
+}
+async function clBoot() {
+  CL.cfg = (await DB.get('kv', 'cloud')) || null;
+  CL.q = (await DB.get('kv', 'syncq')) || {};
+  CL.tombs = (await DB.get('kv', 'tombs')) || {};
+  if (CL.cfg) clStart();
+}
+
 /* ================= Boot ================= */
 let HIDDEN_AT = 0;
 document.addEventListener('visibilitychange', () => { if (document.hidden) HIDDEN_AT = Date.now(); else if (S.settings && S.settings.pin && HIDDEN_AT && Date.now() - HIDDEN_AT > 120000 && !$('#lock').classList.contains('on')) lockScreen('unlock'); });
 (async function boot() {
-  try { await DB.open(); await loadAll(); }
+  try { await DB.open(); await loadAll(); await clBoot(); }
   catch (e) { $('#main').innerHTML = emptyBox('⚠️', 'Storage nahi khul raha', 'Browser private mode mein ho to normal mode mein kholein.'); return; }
   if (!location.hash || location.hash === '#') history.replaceState(null, '', '#/home');
   trackNav();

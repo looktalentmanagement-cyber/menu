@@ -99,6 +99,38 @@
         ".read": "auth != null && (root.child('admins/'+auth.uid).exists() || (auth.token.email != null && auth.token.email.toLowerCase().replace('.', ',') == $k))",
         ".write": "auth != null && root.child('admins/'+auth.uid).exists()"
       }
+    },
+    "erp": {
+      "$cid": {
+        ".read": "auth != null && root.child('erp/'+$cid+'/members/'+auth.uid).exists()",
+        "owner": {
+          ".write": "auth != null && !data.exists() && newData.val() == auth.uid"
+        },
+        "info": {
+          ".write": "auth != null && (root.child('erp/'+$cid+'/owner').val() == auth.uid || (!root.child('erp/'+$cid+'/owner').exists() && newData.parent().child('owner').val() == auth.uid))",
+          ".validate": "newData.hasChildren(['name']) && newData.child('name').isString() && newData.child('name').val().length <= 100"
+        },
+        "members": {
+          "$uid": {
+            ".write": "auth != null && (root.child('erp/'+$cid+'/owner').val() == auth.uid || (!root.child('erp/'+$cid+'/owner').exists() && $uid == auth.uid && newData.parent().parent().child('owner').val() == auth.uid))",
+            ".validate": "newData.hasChildren(['role','email']) && newData.child('email').isString() && newData.child('role').isString() && newData.child('role').val().matches(/^(owner|manager|billing|viewer)$/) && (newData.child('role').val() != 'owner' || $uid == newData.parent().parent().child('owner').val()) && ($uid != newData.parent().parent().child('owner').val() || newData.child('role').val() == 'owner')"
+          }
+        },
+        "data": {
+          "$col": {
+            "$id": {
+              ".write": "auth != null && root.child('erp/'+$cid+'/members/'+auth.uid+'/role').exists() && root.child('erp/'+$cid+'/members/'+auth.uid+'/role').val() != 'viewer' && (root.child('erp/'+$cid+'/members/'+auth.uid+'/role').val() != 'billing' || (($col == 'vouchers' || $col == 'settings') && newData.exists() && !newData.child('deleted').exists()))",
+              ".validate": "$col.matches(/^(items|parties|vouchers|settings)$/) && newData.hasChildren(['updatedAt']) && newData.child('updatedAt').isNumber() && (newData.hasChildren(['j']) || newData.child('deleted').val() == true)"
+            }
+          }
+        }
+      }
+    },
+    "erpUsers": {
+      "$uid": {
+        ".read": "auth != null && auth.uid == $uid",
+        ".write": "auth != null && ((newData.exists() && newData.isString() && newData.parent().parent().child('erp/'+newData.val()+'/owner').val() == auth.uid && (!data.exists() || root.child('erp/'+data.val()+'/owner').val() == auth.uid)) || (!newData.exists() && data.exists() && root.child('erp/'+data.val()+'/owner').val() == auth.uid))"
+      }
     }
   }
 }
