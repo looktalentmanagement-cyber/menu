@@ -304,6 +304,110 @@ const UNITS = ['pcs', 'nos', 'kg', 'gm', 'ton', 'ltr', 'ml', 'mtr', 'ft', 'sqft'
 const GSTR = [0, 0.25, 3, 5, 12, 18, 28, 40];
 const MODES = ['Cash', 'Bank', 'Cheque'];
 const EXP_CATS = ['Rent', 'Salary', 'Electricity', 'Transport', 'Repair', 'Office', 'Telephone', 'Packing', 'Tea/Snacks', 'Other'];
+/* ---------- Tax-tagged expense categories ----------
+   g: ledger group (direxp / indexp) · itc: 'el' eligible | 'bl' blocked | 'na' GST not applicable · nat: 'biz' | 'pers'
+   tds: TDS section hint · ded: personal deduction head · pct: ask business-use % · veh: vehicle log · bizCat: posting when a personal-default item is marked business */
+const XCATS = [
+  ['Petrol/Diesel & Vehicle Running', { g: 'indexp', itc: 'na', nat: 'biz', pct: 1, veh: 1, hint: 'Petrol and diesel are outside GST — no input tax credit.' }],
+  ['Vehicle Repair & Insurance', { g: 'indexp', itc: 'bl', nat: 'biz', pct: 1, veh: 1, hint: 'GST credit on motor vehicles is usually blocked (GST section 17(5)). Change it if your vehicle is a goods carrier or used for transport business.' }],
+  ['Hotel Stay & Business Travel', { g: 'indexp', itc: 'el', nat: 'biz', hint: 'GST credit allowed only if the hotel bill shows your company GSTIN.' }],
+  ['Food & Meals / Restaurant', { g: 'indexp', itc: 'bl', nat: 'biz', hint: 'GST credit on food and meals is blocked (GST section 17(5)).' }],
+  ['Medical / Hospital', { g: 'indexp', itc: 'bl', nat: 'pers', ded: 'med', bizCat: 'Staff Salary & Welfare', hint: 'Your own / family medical bills are personal, not a business expense. Mark Business only for staff medical — it goes to Staff Salary & Welfare.' }],
+  ['Health Insurance', { g: 'indexp', itc: 'bl', nat: 'pers', ded: 'hi', hint: 'Personal deduction — Section 126 (old 80D), old regime only.' }],
+  ['Rent', { g: 'indexp', itc: 'el', nat: 'biz', tds: '194I', hint: 'Deduct TDS on rent above ₹50,000 a month (old section 194I).' }],
+  ['Electricity', { g: 'indexp', itc: 'na', nat: 'biz', hint: 'Electricity is outside GST.' }],
+  ['Phone & Internet', { g: 'indexp', itc: 'el', nat: 'biz', pct: 1 }],
+  ['Office Supplies & Stationery', { g: 'indexp', itc: 'el', nat: 'biz' }],
+  ['Professional Fees', { g: 'indexp', itc: 'el', nat: 'biz', tds: '194J', hint: 'Deduct TDS on professional fees above ₹50,000 a year (old section 194J).' }],
+  ['Contractor / Labour', { g: 'direxp', itc: 'el', nat: 'biz', tds: '194C', hint: 'Deduct TDS on contract payments above ₹30,000 per bill or ₹1,00,000 a year (old section 194C).' }],
+  ['Commission', { g: 'indexp', itc: 'el', nat: 'biz', tds: '194H', hint: 'Deduct TDS on commission above ₹20,000 a year (old section 194H).' }],
+  ['Repairs & Maintenance', { g: 'indexp', itc: 'el', nat: 'biz' }],
+  ['Courier & Freight', { g: 'indexp', itc: 'el', nat: 'biz' }],
+  ['Bank Charges', { g: 'indexp', itc: 'el', nat: 'biz' }],
+  ['Staff Salary & Welfare', { g: 'indexp', itc: 'na', nat: 'biz', hint: 'Salary has no GST. GST on staff food / gifts is usually blocked.' }],
+  ['Advertising', { g: 'indexp', itc: 'el', nat: 'biz' }],
+  ['Donations', { g: 'indexp', itc: 'na', nat: 'pers', ded: 'don', hint: 'Personal deduction — Section 133 (old 80G), old regime only. No cash donation above ₹2,000.' }],
+  ['Insurance (business)', { g: 'indexp', itc: 'el', nat: 'biz' }],
+  ['Loan Interest', { g: 'indexp', itc: 'na', nat: 'biz', hint: 'Interest on business loans is a business expense. Home loan interest: mark Personal.' }],
+  ['Life Insurance/PPF/ELSS', { g: 'indexp', itc: 'na', nat: 'pers', ded: 'c80', hint: 'Personal investment — Section 123 (old 80C), up to ₹1,50,000, old regime only.' }]
+];
+const XCAT = new Map(XCATS);
+const BUILTIN_CATS = [...EXP_CATS, ...XCATS.map(x => x[0])];
+const catMeta = c => XCAT.get(c) || { g: 'indexp', itc: 'el', nat: 'biz' };
+const ITC_TXT = { el: 'Eligible', bl: 'Blocked (17(5))', na: 'Not applicable' };
+// Split an expense voucher into: ITC claimable, business cost (P&L), personal (drawings)
+function expSplit(v) {
+  const A = r2(num(v.amount)), m = catMeta(v.category || 'Other');
+  const pers = v.pers !== undefined ? !!v.pers : m.nat === 'pers';
+  const p = pers ? 0 : Math.min(100, Math.max(0, v.bizPct === undefined || v.bizPct === '' ? 100 : num(v.bizPct))) / 100;
+  const g = Math.min(A, r2(num(v.gstAmt))), itcOn = !pers && g > 0 && itcFlag(v) && taxMode() === 'regular';
+  const itc = itcOn ? r2(g * p) : 0;
+  const biz = r2((A - g) * p + (itcOn ? 0 : g * p));
+  return { amount: A, gst: g, itc, blocked: r2(g * p - itc), biz, pers: r2(A - itc - biz), pct: r2(p * 100), personal: pers, ded: m.ded || '' };
+}
+const itcFlag = v => v.itc !== undefined ? !!v.itc : catMeta(v.category).itc === 'el';
+const expAcc = v => { const m = catMeta(v.category || 'Other'); const pers = v.pers !== undefined ? !!v.pers : m.nat === 'pers'; return 'exp:' + (!pers && m.bizCat ? m.bizCat : (v.category || 'Other')); };
+const expInter = v => { const g = String(v.vgstin || '').toUpperCase(); return gstinOk(g) && co().state && g.slice(0, 2) !== co().state; };
+
+/* ---------- Income-tax RATES (one editable table) ----------
+   Source: Income-tax Act, 2025 (in force 1 Apr 2026) as amended by Finance Act 2026; Budget 2026 kept FY 2025-26 rates.
+   incometaxindia.gov.in (sections 156, 58; FAQs on transition – advance tax), Finance Act 2025 highlights; cross-checked with CA guides. */
+const RATES = {
+  asOf: '10 Nov 2026', fy: 'FY 2026-27 (Tax Year 2026-27, AY 2027-28)',
+  source: 'Income-tax Act, 2025 as amended by Finance Act 2026 (incometaxindia.gov.in: sections 156 & 58, FAQs on transition); Finance Act 2025 highlights for slabs. Rates unchanged by Budget 2026.',
+  cess: 4,
+  newR: { sec: '202 (old 115BAC)', slabs: [[400000, 0], [800000, 5], [1200000, 10], [1600000, 15], [2000000, 20], [2400000, 25], [Infinity, 30]], std: 75000, rebateLimit: 1200000, rebateMax: 60000, surchCap: 25 },
+  oldR: { slabs: { below60: [[250000, 0], [500000, 5], [1000000, 20], [Infinity, 30]], s60: [[300000, 0], [500000, 5], [1000000, 20], [Infinity, 30]], s80: [[500000, 0], [1000000, 20], [Infinity, 30]] }, std: 50000, rebateLimit: 500000, rebateMax: 12500 },
+  rebateSec: '156 (old 87A)', stdSec: '19 (old 16)',
+  surch: [[5000000, 10], [10000000, 15], [20000000, 25], [50000000, 37]],
+  ded: {
+    c80: { sec: '123 (old 80C)', name: 'Life insurance / PPF / ELSS / home-loan principal', limit: 150000 },
+    hi: { sec: '126 (old 80D)', name: 'Health insurance — self & family', limit: 25000, senior: 50000 },
+    hip: { sec: '126 (old 80D)', name: 'Health insurance — parents', limit: 25000, senior: 50000 },
+    hl: { sec: '22 (old 24(b))', name: 'Home-loan interest (self-occupied)', limit: 200000 },
+    nps: { sec: '124 (old 80CCD(1B))', name: 'NPS extra contribution', limit: 50000 },
+    don: { sec: '133 (old 80G)', name: 'Donations (counted at 50%, max 10% of income)', pctAllowed: 50, capPct: 10 }
+  },
+  pres: { sec: '58 (old 44AD / 44ADA)', bizLimit: 20000000, bizLimitDigital: 30000000, cashMaxPct: 5, digitalRate: 6, cashRate: 8, profLimit: 5000000, profLimitDigital: 7500000, profRate: 50 },
+  adv: { sec: 'sections 401–408 (old 207–211)', minTax: 10000, dates: [['06-15', 15], ['09-15', 45], ['12-15', 75], ['03-15', 100]], presDate: '03-15' }
+};
+function slabTax(x, slabs) { let t = 0, lo = 0; for (const [hi, r] of slabs) { if (x > lo) t += (Math.min(x, hi) - lo) * r / 100; lo = hi; } return r2(t); }
+function surchTax(inc, tax, cap) { let r = 0; for (const [lim, p] of RATES.surch) if (inc > lim) r = p; if (cap) r = Math.min(r, cap); return r2(tax * r / 100); }
+// Pure tax calc. I: { biz, salary, other, age:'below60'|'s60'|'s80', parentsSenior, ded:{c80,hi,hip,hl,nps,don}, tds }
+function taxCalc(I) {
+  const bizRaw = num(I.biz), biz = Math.max(0, bizRaw), sal = num(I.salary), oth = num(I.other), D = I.ded || {}, Rd = RATES.ded, senior = I.age && I.age !== 'below60';
+  const gti = r2(biz + sal + oth);
+  const fin = (taxable, slabs, rbL, rbM, cap, relief) => {
+    taxable = Math.max(0, Math.round(taxable)); let tax = slabTax(taxable, slabs), rebate = 0;
+    if (taxable <= rbL) rebate = Math.min(tax, rbM); else if (relief) rebate = Math.max(0, r2(tax - (taxable - rbL)));
+    const afterR = r2(tax - rebate), sc = surchTax(taxable, afterR, cap), cess = r2((afterR + sc) * RATES.cess / 100);
+    return { taxable, slabTax: tax, rebate, surcharge: sc, cess, total: Math.round(afterR + sc + cess) };
+  };
+  const nStd = sal > 0 ? Math.min(sal, RATES.newR.std) : 0;
+  const nw = { std: nStd, deductions: 0, ...fin(gti - nStd, RATES.newR.slabs, RATES.newR.rebateLimit, RATES.newR.rebateMax, RATES.newR.surchCap, true) };
+  const oStd = sal > 0 ? Math.min(sal, RATES.oldR.std) : 0, gtiO = r2(gti - oStd);
+  const lim = { c80: Rd.c80.limit, hi: senior ? Rd.hi.senior : Rd.hi.limit, hip: I.parentsSenior ? Rd.hip.senior : Rd.hip.limit, hl: Rd.hl.limit, nps: Rd.nps.limit };
+  const allowed = {}; Object.keys(lim).forEach(k => allowed[k] = Math.min(num(D[k]), lim[k]));
+  allowed.don = Math.min(r2(num(D.don) * Rd.don.pctAllowed / 100), r2(Math.max(0, gtiO - Object.values(allowed).reduce((a, b) => a + b, 0)) * Rd.don.capPct / 100));
+  const dedT = r2(Math.min(gtiO, Object.values(allowed).reduce((a, b) => a + b, 0)));
+  const old = { std: oStd, deductions: dedT, allowed, limits: lim, ...fin(gtiO - dedT, RATES.oldR.slabs[I.age || 'below60'] || RATES.oldR.slabs.below60, RATES.oldR.rebateLimit, RATES.oldR.rebateMax, 0, false) };
+  const better = nw.total <= old.total ? 'new' : 'old', best = Math.min(nw.total, old.total);
+  const net = Math.max(0, best - num(I.tds));
+  return { gti, bizLoss: bizRaw < 0 ? r2(-bizRaw) : 0, nw, old, better, saving: Math.abs(nw.total - old.total), best, advDue: net, adv: advSchedule(net, I.fyStartYear, I.pres) };
+}
+function advSchedule(net, y, pres) {
+  y = +y || +fyStart().slice(0, 4); if (net < RATES.adv.minTax) return [];
+  const dt = md => (md.startsWith('03') ? y + 1 : y) + '-' + md;
+  if (pres) return [{ date: dt(RATES.adv.presDate), pct: 100, cum: net, amt: net }];
+  let prev = 0; return RATES.adv.dates.map(([md, p]) => { const cum = Math.round(net * p / 100), o = { date: dt(md), pct: p, cum, amt: cum - prev }; prev = cum; return o; });
+}
+// Presumptive income: business 6% digital + 8% cash; profession 50%
+function presCalc(turnover, digitalPct, prof) {
+  const P = RATES.pres, T = num(turnover), dp = Math.min(100, Math.max(0, num(digitalPct))), cashPct = 100 - dp;
+  const limit = prof ? (cashPct <= P.cashMaxPct ? P.profLimitDigital : P.profLimit) : (cashPct <= P.cashMaxPct ? P.bizLimitDigital : P.bizLimit);
+  const income = prof ? Math.round(T * P.profRate / 100) : Math.round(T * dp / 100 * P.digitalRate / 100 + T * cashPct / 100 * P.cashRate / 100);
+  return { eligible: T > 0 && T <= limit, limit, income };
+}
 const GSTIN_RE = /^[0-9]{2}[A-Z0-9]{10}[1-9A-Z][A-Z0-9][0-9A-Z]$/;
 const GCH = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ';
 function gstinCheck(g) { let s = 0; for (let i = 0; i < 14; i++) { const p = GCH.indexOf(g[i]) * (i % 2 ? 2 : 1); s += Math.floor(p / 36) + p % 36; } return GCH[(36 - s % 36) % 36]; }
@@ -615,6 +719,7 @@ function route() {
       case 'r': if (q.acc) LEDGER_ACC = q.acc; return vReport(b);
       case 'accounts': return vAccounts();
       case 'brs': return vBrs();
+      case 'tax': return vTax();
       case 'acv': return vAcvForm(b, null);
       case 'settings': return vSettings();
       default: go('home');
@@ -927,7 +1032,7 @@ function exportLedger(id) {
 /* ================= More ================= */
 function vMore() {
   hdr('More', { right: searchBtn() });
-  const m = [['reports', '📊', 'Reports'], ['exp', '💸', 'Expenses'], ['prod', '🏭', 'Production'], ['bill?f=quote', '📝', 'Quotations'], ['bill?f=pay', '💰', 'Payments'], ['bill?f=ret', '↩', 'Returns / CN / DN'], ...(taxMode() === 'regular' ? [['r/gstr1', '📤', 'GSTR-1'], ['r/gstr3b', '🧮', 'GSTR-3B']] : taxMode() === 'composition' ? [['r/cmp08', '🧾', 'CMP-08']] : []), ['r/pl', '📈', 'Profit & Loss'], ['r/bs', '🏛', 'Balance Sheet'], ['accounts', '📚', 'Accounts'], ['r/tb', '⚖️', 'Trial Balance'], ['brs', '🏦', 'Bank Reconciliation'], ['settings', '⚙️', 'Settings & Backup']];
+  const m = [['reports', '📊', 'Reports'], ['exp', '💸', 'Expenses'], ['prod', '🏭', 'Production'], ['bill?f=quote', '📝', 'Quotations'], ['bill?f=pay', '💰', 'Payments'], ['bill?f=ret', '↩', 'Returns / CN / DN'], ...(taxMode() === 'regular' ? [['r/gstr1', '📤', 'GSTR-1'], ['r/gstr3b', '🧮', 'GSTR-3B']] : taxMode() === 'composition' ? [['r/cmp08', '🧾', 'CMP-08']] : []), ['r/pl', '📈', 'Profit & Loss'], ['r/bs', '🏛', 'Balance Sheet'], ['accounts', '📚', 'Accounts'], ['r/tb', '⚖️', 'Trial Balance'], ['brs', '🏦', 'Bank Reconciliation'], ['tax', '💡', 'Tax Saving'], ['settings', '⚙️', 'Settings & Backup']];
   $('#main').innerHTML = `<div class="mgrid">${m.map(([h, i, l]) => `<button onclick="go('${h}')"><span class="i">${i}</span>${l}</button>`).join('')}</div>
   <div class="card"><h3>New Entry</h3><div class="btns"><button class="btn" onclick="go('new/sale')">+ Sales Invoice</button><button class="btn sec" onclick="go('new/purchase')">+ Purchase Bill</button><button class="btn ghost" onclick="go('new/quote')">+ Quotation</button></div></div>
   <div class="card"><div class="kv"><span>Business</span><b>${esc(co().name)}</b></div><div class="kv"><span>Tax mode</span><span id="moreTax">${TAXMODES.find(x => x[0] === taxMode())[1]}</span></div>${isGstCo() ? `<div class="kv"><span>GSTIN</span><span>${esc(co().gstin || '—')}</span></div>` : ''}<div class="kv"><span>Data</span><span>${S.items.length} items · ${S.parties.length} parties · ${S.vouchers.length} entries</span></div></div>`;
@@ -1245,7 +1350,7 @@ function vView(id) {
   } else {
     const rows = [];
     if (v.type === 'payin' || v.type === 'payout') { const p = party(v.partyId); rows.push(['Party', esc(p ? p.name : '-')], ['Amount', `<b>${inr(v.amount)}</b>`], ['Mode', esc(v.mode)], ['Reference', esc(v.ref || '-')]); }
-    if (v.type === 'exp') rows.push(['Category', esc(v.category)], ['Amount', `<b>${inr(v.amount)}</b>`], ['Mode', esc(v.mode)]);
+    if (v.type === 'exp') { const sp = expSplit(v); rows.push(['Category', esc(v.category)], ['Amount', `<b>${inr(v.amount)}</b>`], ['Mode', esc(v.mode)]); if (v.vendor) rows.push(['Vendor', esc(v.vendor)]); if (v.vgstin) rows.push(['Vendor GSTIN', esc(v.vgstin)]); if (sp.gst) rows.push(['GST', inr(sp.gst)], ['GST credit claimable', inr(sp.itc)]); rows.push(['Business / Personal', sp.personal ? 'Personal (Drawings)' : sp.pct < 100 ? `${sp.pct}% business — ${inr(sp.biz)} expense, ${inr(sp.pers)} drawings` : 'Business']); if (v.km) rows.push(['Odometer / km', esc(v.km)]); if (v.photo) rows.push(['Bill photo', `<img id="vw_photo" src="${v.photo}" style="max-width:180px;border-radius:8px" onclick="openOv('<img src=&quot;'+this.src+'&quot; style=&quot;max-width:100%&quot;>',1)">`]); }
     if (v.entries) { v.entries.forEach(e => rows.push([esc(accName(e.a)), e.dr ? `Dr ${inr(e.dr)}` : `Cr ${inr(e.cr)}`])); if (v.narration) rows.push(['Narration', esc(v.narration)]); }
     if (v.type === 'prod') { const o = item(v.outItem); rows.push(['Produced', `<b>${esc(o ? o.name : '?')}</b> — ${qf(v.outQty)} ${esc(o ? o.unit : '')}`]); (v.lines || []).forEach(l => { const it = item(l.itemId); rows.push(['Used', `${esc(it ? it.name : '?')} — ${qf(l.qty)} ${esc(it ? it.unit : '')}`]); }); }
     rows.unshift(['Date', fd(v.date)], ['No', esc(v.no)]); if (v.note) rows.push(['Note', esc(v.note)]);
@@ -1390,31 +1495,180 @@ function vPayForm(type, existing, q) {
 function vExpList() {
   hdr('Expenses', { back: true });
   const ms = monthStart(); const list = S.vouchers.filter(v => v.type === 'exp').sort(vSort);
-  const mon = list.filter(v => v.date >= ms).reduce((s, v) => s + num(v.amount), 0);
-  const byCat = new Map(); list.filter(v => v.date >= ms).forEach(v => byCat.set(v.category, (byCat.get(v.category) || 0) + num(v.amount)));
-  $('#main').innerHTML = `<div class="grid2"><div class="stat r"><div class="l">This Month's Expenses</div><div class="v">${inr(mon)}</div></div><div class="stat" onclick="go('r/expenses')"><div class="l">Report</div><div class="v" style="font-size:15px">View ›</div></div></div>
+  const mon = list.filter(v => v.date >= ms).reduce((s, v) => s + expSplit(v).biz, 0);
+  const byCat = new Map(); list.filter(v => v.date >= ms).forEach(v => { const k = expSplit(v).personal ? v.category + ' (personal)' : v.category; byCat.set(k, (byCat.get(k) || 0) + num(v.amount)); });
+  $('#main').innerHTML = `<div class="grid2"><div class="stat r"><div class="l">This Month's Business Expenses</div><div class="v">${inr(mon)}</div></div><div class="stat" onclick="go('r/expenses')"><div class="l">Report</div><div class="v" style="font-size:15px">View ›</div></div></div>
+  <button class="btn sec full" style="margin-bottom:10px" onclick="go('tax')">💡 Tax Saving estimate ›</button>
   ${byCat.size ? `<div class="card">${[...byCat.entries()].sort((a, b) => b[1] - a[1]).map(([k, x]) => `<div class="kv"><span>${esc(k)}</span><b>${inr(x)}</b></div>`).join('')}</div>` : ''}
-  <div class="list">${list.length ? list.map(v => `<div class="row" onclick="go('v/${v.id}')"><div class="av">💸</div><div class="m"><div class="t">${esc(v.category)}</div><div class="s">${fd(v.date)} · ${esc(v.mode)}${v.note ? ' · ' + esc(v.note) : ''}</div></div><div class="rt a rd">${inr(v.amount)}</div></div>`).join('') : emptyBox('💸', 'No expenses yet', 'Record expenses like rent, salary and electricity here', `<button class="btn" onclick="go('exp/new')">+ Add Expense</button>`)}</div>`;
+  <div class="list">${list.length ? list.map(v => { const s = expSplit(v); return `<div class="row" onclick="go('v/${v.id}')"><div class="av">${v.photo ? '📷' : '💸'}</div><div class="m"><div class="t">${esc(v.category)}${s.personal ? ' <span class="mu" style="font-size:12px">· Personal</span>' : s.pct < 100 ? ` <span class="mu" style="font-size:12px">· ${s.pct}% business</span>` : ''}</div><div class="s">${fd(v.date)} · ${esc(v.mode)}${v.vendor ? ' · ' + esc(v.vendor) : ''}${v.note ? ' · ' + esc(v.note) : ''}</div></div><div class="rt a rd">${inr(v.amount)}</div></div>`; }).join('') : emptyBox('💸', 'No expenses yet', 'Record expenses like rent, salary and electricity here', `<button class="btn" onclick="go('exp/new')">+ Add Expense</button>`)}</div>`;
   fabBtn(() => go('exp/new'));
   $('#fab').style.bottom = 'calc(16px + env(safe-area-inset-bottom))';
 }
+// Compress a picked image to a JPEG data URL of about maxBytes
+function compressImg(file, maxBytes = 200000) {
+  return new Promise((res, rej) => {
+    const url = URL.createObjectURL(file), img = new Image();
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      let w = img.naturalWidth, h = img.naturalHeight, sc = Math.min(1, 1400 / Math.max(w, h)), q = 0.8, out = '';
+      const cv = document.createElement('canvas');
+      for (let i = 0; i < 12; i++) {
+        cv.width = Math.max(1, Math.round(w * sc)); cv.height = Math.max(1, Math.round(h * sc));
+        const cx = cv.getContext('2d'); cx.fillStyle = '#fff'; cx.fillRect(0, 0, cv.width, cv.height); cx.drawImage(img, 0, 0, cv.width, cv.height);
+        out = cv.toDataURL('image/jpeg', q);
+        if ((out.length - 23) * 0.75 <= maxBytes) break;
+        if (q > 0.45) q -= 0.12; else sc *= 0.8;
+      }
+      res(out);
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); rej(new Error('Could not read this image')); };
+    img.src = url;
+  });
+}
+const dataUrlKB = d => Math.round((String(d || '').length - 23) * 0.75 / 1024);
 function vExpForm(existing) {
   const v = existing ? clone(existing) : { id: uid(), type: 'exp', no: nextNo('exp'), date: today(), category: '', amount: '', mode: 'Cash', note: '' };
   hdr(existing ? 'Edit Expense' : 'New Expense', { back: true });
-  const cats = [...new Set([...EXP_CATS, ...(S.settings.expCats || []), ...S.vouchers.filter(x => x.type === 'exp').map(x => x.category)])];
+  const cats = [...new Set([...BUILTIN_CATS, ...(S.settings.expCats || []), ...S.vouchers.filter(x => x.type === 'exp').map(x => x.category)])];
+  const gstCo = taxMode() === 'regular';
+  let photo = v.photo || '', touchedItc = v.itc !== undefined, touchedNat = v.pers !== undefined;
   $('#main').innerHTML = `<div class="card">
-  <div class="f"><label>Amount (₹) *</label><input id="ef_amount" inputmode="decimal" value="${v.amount}" style="font-size:22px;font-weight:700"></div>
+  <div class="f"><label>Amount paid (₹, including GST) *</label><input id="ef_amount" inputmode="decimal" value="${v.amount}" style="font-size:22px;font-weight:700"></div>
   <div class="f"><label>Category *</label><input id="ef_cat" value="${esc(v.category)}" placeholder="Type or pick a category"></div>
-  <div class="chips" style="flex-wrap:wrap">${cats.map(c => `<button class="chip" type="button" onclick="$('#ef_cat').value=this.textContent">${esc(c)}</button>`).join('')}</div>
-  <div class="f"><label>Mode</label><div class="seg" id="ef_mode">${MODES.map(m => `<button type="button" data-v="${m}" class="${v.mode === m ? 'on' : ''}" onclick="segPick(this)">${m}</button>`).join('')}</div></div>
+  <div class="chips" style="flex-wrap:wrap;max-height:160px;overflow:auto">${cats.map(c => `<button class="chip" type="button" data-c="${esc(c)}">${esc(c)}</button>`).join('')}</div>
+  <div class="mu" id="ef_hint" style="font-size:12.5px;margin:6px 2px"></div>
+  <div class="f"><label>This expense is</label><div class="seg" id="ef_nat"><button type="button" data-v="biz">Business</button><button type="button" data-v="pers">Personal</button></div></div>
+  <div class="f" id="ef_pctW"><label>Business use % (rest is personal)</label><input id="ef_pct" inputmode="decimal" value="${v.bizPct === undefined ? 100 : v.bizPct}"></div>
+  <div class="f" id="ef_kmW"><label>Odometer / km (optional)</label><input id="ef_km" inputmode="decimal" value="${esc(v.km || '')}"></div>
+  </div>
+  <div class="card"><h3>Vendor &amp; GST</h3>
+  <div class="f"><label>Vendor name</label><input id="ef_vendor" value="${esc(v.vendor || '')}" placeholder="Shop / hotel / supplier"></div>
+  <div class="f"><label>Vendor GSTIN</label><input id="ef_vgstin" value="${esc(v.vgstin || '')}" maxlength="15" style="text-transform:uppercase" placeholder="Optional"><div id="ef_gmsg" style="font-size:12px"></div></div>
+  <div id="ef_gstW"><div class="f2"><div class="f"><label>GST rate %</label><select id="ef_rate"><option value="">--</option>${GSTR.map(r => `<option value="${r}" ${String(v.gstRate) === String(r) ? 'selected' : ''}>${r}%</option>`).join('')}</select></div>
+  <div class="f"><label>GST amount (₹)</label><input id="ef_gst" inputmode="decimal" value="${v.gstAmt || ''}"></div></div>
+  ${gstCo ? `<label class="ck"><input type="checkbox" id="ef_itc"> <span>GST credit (ITC) can be claimed</span></label>` : '<div class="mu" style="font-size:12.5px">GST credit is not available for your registration type — GST becomes part of the expense.</div>'}</div>
+  <div class="mu" id="ef_nogst" style="font-size:12.5px">No GST on this category.</div></div>
+  <div class="card">
+  <div class="f"><label>Payment mode</label><div class="seg" id="ef_mode">${MODES.map(m => `<button type="button" data-v="${m}" class="${v.mode === m ? 'on' : ''}" onclick="segPick(this)">${m}</button>`).join('')}</div></div>
   <div class="f"><label>Date</label><input type="date" id="ef_date" value="${v.date}"></div>
-  <div class="f"><label>Note</label><input id="ef_note" value="${esc(v.note)}"></div></div>`;
+  <div class="f"><label>Note</label><input id="ef_note" value="${esc(v.note)}"></div>
+  <div class="f"><label>Bill photo</label><input type="file" id="ef_photo" accept="image/*" capture="environment"></div>
+  <div id="ef_pv"></div>
+  <div class="mu" style="font-size:12px">Photos are made smaller (about 200 KB) and saved with the expense. They also go to your cloud backup — many photos make sync slower.</div></div>`;
+  const $c = $('#ef_cat'), natSeg = $('#ef_nat');
+  const setNat = n => $$('button', natSeg).forEach(b => b.classList.toggle('on', b.dataset.v === n));
+  const pv = () => { $('#ef_pv').innerHTML = photo ? `<img src="${photo}" id="ef_img" style="max-width:100%;border-radius:10px;margin:6px 0"><div class="kv"><span class="mu">${dataUrlKB(photo)} KB</span><button class="btn ghost sm" type="button" id="ef_rm">Remove photo</button></div>` : ''; const rm = $('#ef_rm'); if (rm) rm.onclick = () => { photo = ''; $('#ef_photo').value = ''; pv(); }; };
+  const sync = (fromCat) => {
+    const m = catMeta($c.value.trim());
+    if (fromCat || !touchedNat) setNat(v.pers !== undefined && !fromCat ? (v.pers ? 'pers' : 'biz') : m.nat);
+    if (fromCat) touchedNat = false;
+    const pers = segVal('ef_nat') === 'pers';
+    $('#ef_pctW').style.display = m.pct && !pers ? '' : 'none'; $('#ef_kmW').style.display = m.veh ? '' : 'none';
+    $('#ef_gstW').style.display = m.itc === 'na' ? 'none' : ''; $('#ef_nogst').style.display = m.itc === 'na' ? '' : 'none';
+    const it = $('#ef_itc'); if (it && (fromCat || !touchedItc)) { it.checked = v.itc !== undefined && !fromCat ? !!v.itc : m.itc === 'el'; if (fromCat) touchedItc = false; }
+    if (it) it.disabled = pers;
+    $('#ef_hint').textContent = [m.hint, m.tds && !m.hint ? `TDS may apply (old section ${m.tds}).` : '', XCAT.has($c.value.trim()) ? `GST credit: ${ITC_TXT[m.itc]}.` : ''].filter(Boolean).join(' ');
+  };
+  $$('.chips .chip', $('#main')).forEach(b => b.onclick = () => { $c.value = b.dataset.c; sync(true); });
+  $c.oninput = () => sync(true);
+  $$('button', natSeg).forEach(b => b.onclick = () => { setNat(b.dataset.v); touchedNat = true; sync(false); });
+  if ($('#ef_itc')) $('#ef_itc').onchange = () => { touchedItc = true; };
+  const g = $('#ef_vgstin'); g.oninput = () => { const x = g.value.trim().toUpperCase(), e = x.length === 15 ? gstinErr(x) : ''; $('#ef_gmsg').textContent = !x ? '' : x.length < 15 ? `${x.length}/15 characters` : e || `✓ Valid GSTIN · ${stateName(x.slice(0, 2))}`; $('#ef_gmsg').className = e ? 'rd' : x.length === 15 ? 'gr' : 'mu'; };
+  const autoGst = () => { const r = num($('#ef_rate').value), a = num($('#ef_amount').value); if (r && a) $('#ef_gst').value = r2(a * r / (100 + r)); };
+  $('#ef_rate').onchange = autoGst; $('#ef_amount').addEventListener('change', () => { if ($('#ef_rate').value) autoGst(); });
+  $('#ef_photo').onchange = async e => { const f = e.target.files[0]; if (!f) return; try { photo = await compressImg(f); pv(); toast(`Photo attached (${dataUrlKB(photo)} KB)`); } catch (er) { toast(er.message); } };
+  if ($('#ef_itc') && v.itc !== undefined) $('#ef_itc').checked = !!v.itc;
+  sync(false); if (v.pers !== undefined) setNat(v.pers ? 'pers' : 'biz'); sync(false); pv(); g.oninput();
   savebar(`<button class="btn full" id="ef_save">Save</button>`);
   $('#ef_save').onclick = async () => {
-    v.amount = r2(num($('#ef_amount').value)); v.category = $('#ef_cat').value.trim(); v.mode = segVal('ef_mode') || 'Cash'; v.date = $('#ef_date').value || today(); v.note = $('#ef_note').value.trim();
+    v.amount = r2(num($('#ef_amount').value)); v.category = $c.value.trim(); v.mode = segVal('ef_mode') || 'Cash'; v.date = $('#ef_date').value || today(); v.note = $('#ef_note').value.trim();
     if (!(v.amount > 0)) return toast('Enter the amount'); if (!v.category) return toast('Select a category');
+    const m = catMeta(v.category), gs = g.value.trim().toUpperCase();
+    if (gs && gstinErr(gs)) return toast(gstinErr(gs));
+    v.vendor = $('#ef_vendor').value.trim(); v.vgstin = gs; v.pers = segVal('ef_nat') === 'pers';
+    v.bizPct = m.pct && !v.pers ? Math.min(100, Math.max(0, num($('#ef_pct').value))) : 100;
+    if (m.veh) v.km = $('#ef_km').value.trim(); else delete v.km;
+    if (m.itc === 'na') { v.gstRate = ''; v.gstAmt = 0; v.itc = false; } else { v.gstRate = $('#ef_rate').value; v.gstAmt = r2(num($('#ef_gst').value)); v.itc = gstCo && !!($('#ef_itc') && $('#ef_itc').checked); }
+    if (v.gstAmt > v.amount) return toast('GST amount cannot be more than the amount paid');
+    if (photo) v.photo = photo; else delete v.photo;
     await saveRec('vouchers', v); await bumpNo('exp', v.no); toast('Expense saved ✓'); replaceTo('exp');
   };
+}
+
+/* ================= Tax Saving (estimate) ================= */
+function persDed(vs) {
+  const D = { c80: 0, hi: 0, don: 0, med: 0, list: [] };
+  vs.filter(v => v.type === 'exp').forEach(v => { const s = expSplit(v); if (!s.pers) return; D.list.push(v); if (s.personal && s.ded) D[s.ded] = r2(D[s.ded] + s.pers); });
+  return D;
+}
+const fyLabel = y => `FY ${y}-${String((y + 1) % 100).padStart(2, '0')}`;
+function taxInputs(y) {
+  const T = (S.settings.taxIn || {})[y] || {}, from = `${y}-04-01`, to = `${y + 1}-03-31`;
+  const P = plCalc(from, to), D = persDed(S.vouchers.filter(v => v.date >= from && v.date <= to));
+  return { T, P, D, I: { biz: P.np, salary: num(T.salary), other: num(T.other), tds: num(T.tds), age: T.age || 'below60', parentsSenior: !!T.psen, fyStartYear: y,
+    ded: { c80: r2(D.c80 + num(T.c80)), hi: r2(D.hi + num(T.hi)), hip: num(T.hip), hl: num(T.hl), nps: num(T.nps), don: r2(D.don + num(T.don)) } } };
+}
+let TAX_FY = 0, TAX_T;
+function vTax() {
+  hdr('Tax Saving', { back: true });
+  const fys = fyList(); if (!TAX_FY) TAX_FY = fys[0];
+  const { T, P } = taxInputs(TAX_FY);
+  const inp = (id, l, val, ph) => `<div class="f"><label>${l}</label><input id="tx_${id}" data-k="${id}" inputmode="decimal" value="${val || ''}" placeholder="${ph || '0'}"></div>`;
+  $('#main').innerHTML = `<div class="warnbox" id="tx_disc" style="margin:0 0 10px"><b>Estimate only — confirm with your CA.</b> For a resident individual / proprietor. Rates for ${RATES.fy}, as of ${RATES.asOf}.</div>
+  <div class="f"><label>Financial year</label><select id="tx_fy">${fys.map(y => `<option value="${y}" ${y === TAX_FY ? 'selected' : ''}>${fyLabel(y)}</option>`).join('')}</select></div>
+  <div class="card"><h3>Income</h3><div class="kv"><span>Business profit from your books</span><b id="tx_biz">${inr(P.np)}</b></div>
+  <div class="f2">${inp('salary', 'Salary / pension (₹)', T.salary)}${inp('other', 'Other income — interest, rent (₹)', T.other)}</div>
+  <div class="f2">${inp('tds', 'TDS / tax already paid (₹)', T.tds)}<div class="f"><label>Your age</label><select id="tx_age" data-k="age">${[['below60', 'Below 60'], ['s60', '60 to 79'], ['s80', '80 or more']].map(([k, l]) => `<option value="${k}" ${(T.age || 'below60') === k ? 'selected' : ''}>${l}</option>`).join('')}</select></div></div></div>
+  <div class="card"><h3>Deductions (old regime)</h3><div class="mu" style="font-size:12.5px;margin-bottom:6px">Amounts from your personal expenses are added automatically. Enter anything paid outside the app.</div>
+  <div class="f2">${inp('c80', 'Extra LIC / PPF / ELSS / home-loan principal', T.c80)}${inp('hi', 'Extra health insurance — self & family', T.hi)}</div>
+  <div class="f2">${inp('hip', 'Health insurance — parents', T.hip)}${inp('hl', 'Home-loan interest (self-occupied)', T.hl)}</div>
+  <div class="f2">${inp('nps', 'NPS extra contribution', T.nps)}${inp('don', 'Extra donations', T.don)}</div>
+  <label class="ck"><input type="checkbox" id="tx_psen" data-k="psen" ${T.psen ? 'checked' : ''}> <span>Parents are senior citizens</span></label></div>
+  <div class="card"><h3>Presumptive scheme check</h3>
+  <div class="f2">${inp('turn', 'Turnover / gross receipts (₹)', T.turn, String(Math.round(P.netSales)))}${inp('dig', 'Received by bank / UPI (%)', T.dig, '100')}</div>
+  <label class="ck"><input type="checkbox" id="tx_prof" data-k="prof" ${T.prof ? 'checked' : ''}> <span>I am a professional (doctor, lawyer, CA, engineer, consultant…)</span></label></div>
+  <div id="tx_out"></div>`;
+  $('#tx_fy').onchange = () => { TAX_FY = +$('#tx_fy').value; vTax(); };
+  $$('#main [data-k]').forEach(el => el.addEventListener(el.type === 'checkbox' || el.tagName === 'SELECT' ? 'change' : 'input', () => {
+    const all = S.settings.taxIn = S.settings.taxIn || {}, t = all[TAX_FY] = all[TAX_FY] || {};
+    t[el.dataset.k] = el.type === 'checkbox' ? el.checked : el.tagName === 'SELECT' ? el.value : el.value.trim();
+    taxOut(); clearTimeout(TAX_T); TAX_T = setTimeout(() => saveSettings(), 600);
+  }));
+  taxOut();
+}
+function taxOut() {
+  const { T, P, D, I } = taxInputs(TAX_FY), C = taxCalc(I), R_ = RATES.ded;
+  const turn = T.turn === undefined || T.turn === '' ? P.netSales : num(T.turn), dig = T.dig === undefined || T.dig === '' ? 100 : num(T.dig);
+  const PR = presCalc(turn, dig, !!T.prof);
+  let presH = '';
+  if (PR.eligible) {
+    const C2 = taxCalc({ ...I, biz: PR.income, pres: true }), diff = C.best - C2.best;
+    presH = `<div class="card" id="tx_pres"><h3>Presumptive scheme — Section ${RATES.pres.sec}</h3><div class="kv"><span>Income on presumptive basis (${T.prof ? RATES.pres.profRate + '% of receipts' : `${RATES.pres.digitalRate}% of bank/UPI + ${RATES.pres.cashRate}% of cash`})</span><b>${inr(PR.income)}</b></div><div class="kv"><span>Profit as per books</span><b>${inr(P.np)}</b></div><div class="kv"><span>Tax with presumptive income</span><b>${inr(C2.best)}</b></div>
+    <div class="mu" style="font-size:12.5px">${diff > 0 ? `Presumptive scheme could save about ${inr(diff)}. ` : diff < 0 ? `Your books show lower profit — presumptive would cost ${inr(-diff)} more. ` : ''}No detailed books or tax audit needed for this income, and advance tax is paid once by 15 March. Once you leave the scheme you cannot come back for 5 years.</div></div>`;
+  } else if (turn > 0) presH = `<div class="card mu" id="tx_pres" style="font-size:12.5px">Presumptive scheme not available — turnover is above ${inr(PR.limit)}.</div>`;
+  const row = (l, a, b, bold) => `<tr${bold ? ' class="tot"' : ''}><td>${l}</td><td class="n">${nfa(a)}</td><td class="n">${nfa(b)}</td></tr>`;
+  const ded = [['c80', R_.c80], ['hi', R_.hi], ['hip', R_.hip], ['hl', R_.hl], ['nps', R_.nps]].map(([k, d]) => [d.name, d.sec, num(I.ded[k]), C.old.limits[k], Math.max(0, r2(C.old.limits[k] - num(I.ded[k])))]);
+  const tips = [];
+  if (C.better === 'new') tips.push('The new regime is lower for you — most deductions do not count there, so invest for your goals, not only for tax.');
+  else tips.push('The old regime is lower for you — you must choose it when filing your return (business owners can switch back only once).');
+  if (ded[0][4] > 0) tips.push(`You can still invest ${inr(ded[0][4])} in PPF / ELSS / LIC under Section ${R_.c80.sec} (helps only in the old regime).`);
+  if (ded[1][4] > 0) tips.push(`Health insurance for yourself and family can save tax up to ${inr(C.old.limits.hi)} more (Section ${R_.hi.sec}).`);
+  if (!num(I.ded.nps)) tips.push(`NPS extra contribution up to ${inr(R_.nps.limit)} is deductible in the old regime (Section ${R_.nps.sec}).`);
+  tips.push('Mark personal bills as Personal so business profit is not understated — it goes to Drawings, not Profit & Loss.');
+  tips.push('Keep vendor GST bills with your GSTIN for hotels, phone and repairs to claim GST credit.');
+  if (C.advDue >= RATES.adv.minTax) tips.push('Pay advance tax on time — late payment adds interest (old sections 234B / 234C).');
+  $('#tx_out').innerHTML = `<div class="grid2"><div class="stat ${C.better === 'old' ? 'g' : 'b'}" style="cursor:default"><div class="l">Old regime tax</div><div class="v" id="tx_old">${inr(C.old.total)}</div></div><div class="stat ${C.better === 'new' ? 'g' : 'b'}" style="cursor:default"><div class="l">New regime tax</div><div class="v" id="tx_new">${inr(C.nw.total)}</div></div></div>
+  <div class="card" id="tx_best"><b>${C.better === 'new' ? 'New' : 'Old'} regime is lower${C.saving ? ` — you save ${inr(C.saving)}` : ' (both equal)'}.</b></div>
+  <div class="tblw"><table class="t" id="tx_tbl"><thead><tr><th>Item</th><th class="n">Old</th><th class="n">New</th></tr></thead><tbody>
+  ${row('Gross income', C.gti, C.gti)}${row('Standard deduction (salary) — Sec ' + RATES.stdSec, C.old.std, C.nw.std)}${row('Deductions', C.old.deductions, 0)}${row('Taxable income', C.old.taxable, C.nw.taxable, 1)}${row('Tax on slabs', C.old.slabTax, C.nw.slabTax)}${row('Rebate — Sec ' + RATES.rebateSec, C.old.rebate, C.nw.rebate)}${row('Surcharge', C.old.surcharge, C.nw.surcharge)}${row('Health & education cess ' + RATES.cess + '%', C.old.cess, C.nw.cess)}${row('Total tax', C.old.total, C.nw.total, 1)}</tbody></table></div>
+  ${C.bizLoss ? `<p class="mu" style="font-size:12px;margin:4px">Business loss of ${inr(C.bizLoss)} is not set off against salary — it can be carried forward to later years (ask your CA).</p>` : ''}
+  <div class="sect">Deduction limits (old regime)</div><div class="tblw"><table class="t" id="tx_ded"><thead><tr><th>Deduction</th><th class="n">Claimed</th><th class="n">Limit</th><th class="n">Left</th></tr></thead><tbody>${ded.map(r => `<tr><td>${esc(r[0])}<div class="mu" style="font-size:11px">Sec ${esc(r[1])}</div></td><td class="n">${nfa(r[2])}</td><td class="n">${nfa(r[3])}</td><td class="n">${nfa(r[4])}</td></tr>`).join('')}<tr><td>Donations<div class="mu" style="font-size:11px">Sec ${R_.don.sec} · counted at 50%, max 10% of income</div></td><td class="n">${nfa(num(I.ded.don))}</td><td class="n">${nfa(C.old.allowed.don)}</td><td class="n">—</td></tr></tbody></table></div>
+  ${D.med ? `<p class="mu" style="font-size:12px;margin:4px">Personal medical bills of ${inr(D.med)} are not deductible (except for senior citizens without insurance).</p>` : ''}
+  ${presH}
+  <div class="sect">Advance tax — ${RATES.adv.sec}</div>
+  ${C.adv.length ? `<div class="tblw"><table class="t" id="tx_adv"><thead><tr><th>Pay by</th><th class="n">Total by then</th><th class="n">This instalment</th></tr></thead><tbody>${C.adv.map(a => `<tr><td>${fd(a.date)} (${a.pct}%)</td><td class="n">${nfa(a.cum)}</td><td class="n">${nfa(a.amt)}</td></tr>`).join('')}</tbody></table></div><p class="mu" style="font-size:12px;margin:4px">Based on the lower regime, after TDS. Presumptive-scheme users can pay everything by 15 March.</p>` : `<div class="card mu" id="tx_adv" style="font-size:13px">No advance tax needed — tax after TDS is below ${inr(RATES.adv.minTax)}.</div>`}
+  <div class="sect">Tips</div><div class="card" id="tx_tips">${tips.map(t => `<div style="margin:4px 0">• ${esc(t)}</div>`).join('')}</div>
+  <p class="mu" style="font-size:11.5px;margin:4px">Source: ${esc(RATES.source)} As of ${RATES.asOf}. Surcharge marginal relief, capital gains, HRA and other special cases are not included. Estimate only — confirm with your CA.</p>`;
 }
 
 /* ================= Production ================= */
@@ -1458,7 +1712,7 @@ const GROUPS = [
   ['fixed', 'Fixed Assets', 'A'], ['curassets', 'Current Assets', 'A'], ['debtors', 'Sundry Debtors', 'A'], ['bankg', 'Bank Accounts', 'A'], ['cashg', 'Cash-in-Hand', 'A'],
   ['salesg', 'Sales Accounts', 'I'], ['salesretg', 'Sales Returns', 'I'], ['dirinc', 'Direct Income', 'I'], ['indinc', 'Indirect Income', 'I'],
   ['purg', 'Purchase Accounts', 'E'], ['purretg', 'Purchase Returns', 'E'], ['direxp', 'Direct Expenses', 'E'], ['indexp', 'Indirect Expenses', 'E']];
-const DEF_LEDGERS = [['capital', 'Capital Account', 'capital'], ['cash', 'Cash', 'cashg'], ['bank', 'Bank Account', 'bankg'], ['walkin', 'Walk-in Customers', 'debtors'],
+const DEF_LEDGERS = [['capital', 'Capital Account', 'capital'], ['drawings', 'Drawings (personal)', 'capital'], ['cash', 'Cash', 'cashg'], ['bank', 'Bank Account', 'bankg'], ['walkin', 'Walk-in Customers', 'debtors'],
   ['sales', 'Sales', 'salesg'], ['sret', 'Sales Returns', 'salesretg'], ['purchase', 'Purchase', 'purg'], ['pret', 'Purchase Returns', 'purretg'],
   ['out_cgst', 'Output CGST', 'duties'], ['out_sgst', 'Output SGST', 'duties'], ['out_igst', 'Output IGST', 'duties'], ['out_cess', 'Output Cess', 'duties'],
   ['in_cgst', 'Input CGST', 'duties'], ['in_sgst', 'Input SGST', 'duties'], ['in_igst', 'Input IGST', 'duties'], ['in_cess', 'Input Cess', 'duties'],
@@ -1472,13 +1726,13 @@ function accList() {
   const L = DEF_LEDGERS.map(([id, name, group]) => ({ id, name, group, sys: 1 }));
   (S.settings.ledgers || []).forEach(l => L.push({ ...l }));
   S.parties.forEach(p => L.push({ id: 'p:' + p.id, name: p.name, group: p.kind === 'supp' ? 'creditors' : 'debtors', party: 1 }));
-  const cats = new Set([...EXP_CATS, ...(S.settings.expCats || [])]); S.vouchers.forEach(v => { if (v.type === 'exp') cats.add(v.category || 'Other'); (v.entries || []).forEach(e => { if (String(e.a).startsWith('exp:')) cats.add(e.a.slice(4)); }); });
-  cats.forEach(c => L.push({ id: 'exp:' + c, name: c + ' (Expense)', group: 'indexp', exp: 1 }));
+  const cats = new Set([...BUILTIN_CATS, ...(S.settings.expCats || [])]); S.vouchers.forEach(v => { if (v.type === 'exp') { cats.add(v.category || 'Other'); cats.add(expAcc(v).slice(4)); } (v.entries || []).forEach(e => { if (String(e.a).startsWith('exp:')) cats.add(e.a.slice(4)); }); });
+  cats.forEach(c => L.push({ id: 'exp:' + c, name: c + ' (Expense)', group: catMeta(c).g, exp: 1 }));
   return L;
 }
 function accById(id, L) {
   const a = (L || accList()).find(x => x.id === id); if (a) return a;
-  if (String(id).startsWith('exp:')) return { id, name: id.slice(4) + ' (Expense)', group: 'indexp' };
+  if (String(id).startsWith('exp:')) return { id, name: id.slice(4) + ' (Expense)', group: catMeta(id.slice(4)).g };
   if (String(id).startsWith('p:')) return { id, name: '(Deleted party)', group: 'debtors' };
   return { id, name: String(id), group: 'curliab' };
 }
@@ -1500,7 +1754,7 @@ function postings(v) {
   if (v.entries) v.entries.forEach(e => add(e.a, num(e.dr) - num(e.cr)));
   else if (v.type === 'payin') pair(moneyAcc(v.mode), P, num(v.amount));
   else if (v.type === 'payout') pair(P, moneyAcc(v.mode), num(v.amount));
-  else if (v.type === 'exp') pair('exp:' + (v.category || 'Other'), moneyAcc(v.mode), num(v.amount));
+  else if (v.type === 'exp') { const sp = expSplit(v), M_ = moneyAcc(v.mode); pair(expAcc(v), M_, sp.biz); pair('drawings', M_, sp.pers); if (sp.itc) { if (expInter(v)) pair('in_igst', M_, sp.itc); else { const h = r2(sp.itc / 2); pair('in_cgst', M_, h); pair('in_sgst', M_, r2(sp.itc - h)); } } }
   else if (t.lines) {
     const d = ['sret', 'cn', 'pret'].includes(v.type) ? -1 : 1;
     const c = num(v.cgst), s = num(v.sgst), i = num(v.igst), x = num(v.cess), tax = r2(c + s + i + x);
@@ -1612,7 +1866,7 @@ function accDelBlock(id) {
   id = String(id); const a = accById(id);
   if (DEF_LEDGERS.some(x => x[0] === id)) return `${a.name} is a built-in account and cannot be deleted.`;
   const isExp = id.startsWith('exp:'), cat = id.slice(4), pid = id.startsWith('p:') ? id.slice(2) : '';
-  if (isExp && EXP_CATS.includes(cat)) return `${cat} is a built-in expense category and cannot be deleted.`;
+  if (isExp && BUILTIN_CATS.includes(cat)) return `${cat} is a built-in expense category and cannot be deleted.`;
   const n = S.vouchers.filter(v => (pid && v.partyId === pid) || (isExp && v.type === 'exp' && (v.category || 'Other') === cat) || (v.entries || []).some(e => e.a === id) || postings(v).some(e => e.a === id)).length;
   return n ? `${isExp ? cat + ' (expense category)' : a.name} is used in ${n} ${n === 1 ? 'entry' : 'entries'}, so it cannot be deleted. Delete or change those entries first.` : '';
 }
@@ -1705,7 +1959,7 @@ function vAccounts() {
   <div class="btns" style="margin-bottom:12px"><button class="btn ghost sm" onclick="go('acv/rcpt')">+ Receipt</button><button class="btn ghost sm" onclick="go('acv/pmt')">+ Payment</button><button class="btn ghost sm" onclick="go('acv/contra')">+ Contra</button><button class="btn ghost sm" onclick="go('acv/jv')">+ Journal</button></div>
   ${Math.abs(od) > 0.004 ? `<div class="warnbox" style="margin-bottom:10px">Opening balances differ by ${inr(Math.abs(od))} (${od > 0 ? 'Dr' : 'Cr'}). Add your capital or other opening balances to clear it.</div>` : ''}
   <div id="accList">${GROUPS.map(([g, gn]) => { const ls = L.filter(l => l.group === g); const tot = r2(ls.reduce((s, l) => s + (T.get(l.id) || 0), 0));
-    return `<div class="sect" style="display:flex;justify-content:space-between"><span>${esc(gn)}</span><span data-grp="${g}">${drcr(tot)}</span></div><div class="list">${ls.length ? ls.map(l => { const b = T.get(l.id) || 0; return `<div class="row" data-acc="${esc(l.id)}" onclick="go('r/ledger?acc=${esc(accEnc(l.id))}')"><div class="m"><div class="t">${esc(l.name)}</div>${l.sys ? '' : `<div class="s">${l.party ? 'Party' : l.exp ? 'Expense category' : 'Your ledger'}</div>`}</div><div class="rt a ${b < -0.004 ? 'rd' : ''}">${drcr(b)}</div>${l.sys || (l.exp && EXP_CATS.includes(l.id.slice(4))) ? '' : `<button class="x" data-del="${esc(l.id)}" aria-label="Delete" onclick="event.stopPropagation();delAccount(this.dataset.del)" style="margin-left:6px">🗑</button>`}</div>`; }).join('') : '<div class="row mu" style="font-size:13px">No ledgers</div>'}</div>`; }).join('')}</div>`;
+    return `<div class="sect" style="display:flex;justify-content:space-between"><span>${esc(gn)}</span><span data-grp="${g}">${drcr(tot)}</span></div><div class="list">${ls.length ? ls.map(l => { const b = T.get(l.id) || 0; return `<div class="row" data-acc="${esc(l.id)}" onclick="go('r/ledger?acc=${esc(accEnc(l.id))}')"><div class="m"><div class="t">${esc(l.name)}</div>${l.sys ? '' : `<div class="s">${l.party ? 'Party' : l.exp ? 'Expense category' : 'Your ledger'}</div>`}</div><div class="rt a ${b < -0.004 ? 'rd' : ''}">${drcr(b)}</div>${l.sys || (l.exp && BUILTIN_CATS.includes(l.id.slice(4))) ? '' : `<button class="x" data-del="${esc(l.id)}" aria-label="Delete" onclick="event.stopPropagation();delAccount(this.dataset.del)" style="margin-left:6px">🗑</button>`}</div>`; }).join('') : '<div class="row mu" style="font-size:13px">No ledgers</div>'}</div>`; }).join('')}</div>`;
 }
 function addLedger() {
   if (clOn() && !can('masters')) return denyToast();
@@ -1806,6 +2060,10 @@ const ALL_REPORTS = [
   ['tb', '⚖️', 'Trial Balance', 'Debit and credit totals of every account', 'all'],
   ['itemsales', '🏷', 'Item-wise Sales', 'Quantity sold per item', 'all'],
   ['expenses', '💸', 'Expense Report', 'Category-wise expenses', 'all'],
+  ['expcat', '📅', 'Expense by Category × Month', 'Business expenses month by month', 'all'],
+  ['itcexp', '🧾', 'Expense GST Credit', 'GST credit claimable vs blocked on expenses', 'gst'],
+  ['perded', '🧍', 'Personal Deductions (for ITR)', 'Health insurance, PPF / ELSS, donations, medical', 'all'],
+  ['vehlog', '⛽', 'Vehicle / Petrol Log', 'Fuel and repairs with business use %', 'all'],
   ['roundoff', '⚖️', 'Round Off Ledger', 'Rounding on every bill', 'all']
 ];
 const repOk = w => w === 'all' || (w === 'gst' ? isGstCo() : w === taxMode());
@@ -2177,6 +2435,46 @@ function buildReport(name) {
     const dr = list.map(v => [fd(v.date), v.no, v.category, v.mode, v.note || '', num(v.amount)]);
     R.sections.push({ title: 'Details', cols: [C_('Date'), C_('No'), C_('Category'), C_('Mode'), C_('Note'), C_('Amount', 1)], rows: dr, total: ['Total', '', '', '', '', sumCol(dr, 5)] });
   }
+  if (name === 'expcat') {
+    R.title = 'Expense by Category × Month';
+    const list = vs.filter(v => v.type === 'exp'), months = [];
+    for (let d = RANGE.from.slice(0, 7); d <= RANGE.to.slice(0, 7) && months.length < 37; d = addDays(monthEnd(d + '-01'), 1).slice(0, 7)) months.push(d);
+    const ms = months.length ? months : [RANGE.from.slice(0, 7)], m = new Map(), pers = new Map();
+    list.forEach(v => { const s = expSplit(v), k = accName(expAcc(v)).replace(/ \(Expense\)$/, ''), mo = v.date.slice(0, 7); if (s.biz) { const a = m.get(k) || {}; a[mo] = r2((a[mo] || 0) + s.biz); m.set(k, a); } if (s.pers) pers.set(mo, r2((pers.get(mo) || 0) + s.pers)); });
+    const lbl = mo => new Date(+mo.slice(0, 4), +mo.slice(5, 7) - 1, 1).toLocaleString('en-IN', { month: 'short' }) + '-' + mo.slice(2, 4);
+    const rows = [...m.entries()].map(([k, a]) => [k, ...ms.map(mo => a[mo] || 0), r2(ms.reduce((s, mo) => s + (a[mo] || 0), 0))]).sort((a, b) => b[b.length - 1] - a[a.length - 1]);
+    const cols = [C_('Category'), ...ms.map(mo => C_(lbl(mo), 1)), C_('Total', 1)];
+    R.sections.push({ title: 'Business expenses (in Profit & Loss)', csv: 1, cols, rows, total: ['Total', ...ms.map((_, i) => sumCol(rows, i + 1)), sumCol(rows, ms.length + 1)] });
+    const pr = [['Personal (to Drawings)', ...ms.map(mo => pers.get(mo) || 0), r2([...pers.values()].reduce((a, b) => a + b, 0))]];
+    R.sections.push({ title: 'Personal part', cols, rows: pr });
+    R.cards = [['Business expenses', inr(sumCol(rows, ms.length + 1))], ['Personal (drawings)', inr(pr[0][ms.length + 1])]];
+    R.note = 'Business amounts exclude GST you can claim back and the personal share of mixed-use items (vehicle, phone).';
+  }
+  if (name === 'itcexp') {
+    R.title = 'Expense GST Credit';
+    const rows = vs.filter(v => v.type === 'exp' && num(v.gstAmt) > 0).map(v => { const s = expSplit(v), m = catMeta(v.category); return [fd(v.date), v.vendor || '', v.vgstin || '', v.category, s.gst, s.itc, r2(s.gst - s.itc), s.personal ? 'Personal' : s.itc ? (s.pct < 100 ? `Claimable on ${s.pct}% business share` : 'Claimable') : !itcFlag(v) ? (m.itc === 'bl' ? 'Blocked — section 17(5)' : 'Marked not claimable') : 'No GST credit for your registration']; });
+    R.sections.push({ csv: 1, cols: [C_('Date'), C_('Vendor'), C_('GSTIN'), C_('Category'), C_('GST paid', 1), C_('Claimable', 1), C_('Not claimable', 1), C_('Reason')], rows, total: ['Total', '', '', '', sumCol(rows, 4), sumCol(rows, 5), sumCol(rows, 6), ''] });
+    const noG = rows.filter(r => r[5] > 0 && !gstinOk(r[2])).length;
+    R.cards = [['GST credit claimable', inr(sumCol(rows, 5))], ['Not claimable (cost)', inr(sumCol(rows, 6))]];
+    if (noG) R.warn = [`${noG} claimable expense(s) have no valid vendor GSTIN — credit needs the vendor's GST bill in your GSTR-2B.`];
+    R.note = 'Claimable GST is posted to Input CGST / SGST (or IGST for other-state vendors). Not-claimable GST is added to the expense.';
+  }
+  if (name === 'perded') {
+    R.title = 'Personal Deductions (for ITR)';
+    const D = persDed(vs), Rd = RATES.ded;
+    const rows = [['Life insurance / PPF / ELSS', 'Section ' + Rd.c80.sec, D.c80, Rd.c80.limit], ['Health insurance', 'Section ' + Rd.hi.sec, D.hi, Rd.hi.limit], ['Donations', 'Section ' + Rd.don.sec, D.don, '50% / 100% by donee'], ['Medical / hospital (personal)', 'Not deductible (Section 126 only for seniors without insurance)', D.med, '']];
+    R.sections.push({ title: 'From your personal expenses', cols: [C_('Deduction'), C_('Section'), C_('Paid', 1), C_('Limit', 1)], rows, total: ['Total', '', sumCol(rows, 2), ''] });
+    const dr = D.list.map(v => [fd(v.date), v.category, v.vendor || '', v.note || '', expSplit(v).pers]);
+    R.sections.push({ title: 'All personal payments (Drawings)', csv: 1, cols: [C_('Date'), C_('Category'), C_('Paid to'), C_('Note'), C_('Amount', 1)], rows: dr, total: ['Total', '', '', '', sumCol(dr, 4)] });
+    R.cards = [['Deductible items', inr(r2(D.c80 + D.hi + D.don))], ['Total drawings via expenses', inr(sumCol(dr, 4))]];
+    R.note = 'These deductions count only under the old regime. Keep receipts. See Tax Saving for old vs new regime.';
+  }
+  if (name === 'vehlog') {
+    R.title = 'Vehicle / Petrol Log';
+    const rows = vs.filter(v => v.type === 'exp' && catMeta(v.category).veh).sort((a, b) => a.date.localeCompare(b.date)).map(v => { const s = expSplit(v); return [fd(v.date), v.category, v.vendor || '', v.km || '', v.note || '', s.amount, s.pct, s.biz, s.pers]; });
+    R.sections.push({ csv: 1, cols: [C_('Date'), C_('Type'), C_('Vendor'), C_('Odometer / km'), C_('Note'), C_('Amount', 1), C_('Business %', 1), C_('Business', 1), C_('Personal', 1)], rows, total: ['Total', '', '', '', '', sumCol(rows, 5), '', sumCol(rows, 7), sumCol(rows, 8)] });
+    R.cards = [['Vehicle spend', inr(sumCol(rows, 5))], ['Business share', inr(sumCol(rows, 7))]];
+  }
   return R;
 }
 function cellH(c, x) { if (c.n && typeof x === 'number') return `<td class="n ${x < 0 ? 'rd' : ''}">${nfa(x)}</td>`; return `<td${c.n ? ' class="n"' : ''}>${esc(x)}</td>`; }
@@ -2354,7 +2652,7 @@ function canSeeV(v) { return ROLE() !== 'billing' || !['purchase', 'pret', 'payo
 function routeAllowed(a, b) {
   switch (a) {
     case 'new': case 'pay': case 'acv': return canV(b);
-    case 'accounts': case 'brs': return can('reports');
+    case 'accounts': case 'brs': case 'tax': return can('reports');
     case 'edit': { const v = vch(b); return !v || canV(v.type); }
     case 'v': { const v = vch(b); return !v || canSeeV(v); }
     case 'exp': return b === 'new' ? canV('exp') : can('exp');
