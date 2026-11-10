@@ -233,7 +233,7 @@ const DB = {
 
 /* ================= State ================= */
 const APP = 'LedgerOne', APP_SUB = 'Billing • GST • Accounts', APP_VER = '3.0';
-const S = { settings: null, items: [], parties: [], vouchers: [] };
+const S = { settings: null, items: [], parties: [], vouchers: [], audit: [] };
 const DEF_CO = () => ({ name: '', address: '', city: '', pin: '', gstin: '', state: '27', phone: '', email: '', prefix: 'INV-', ngPrefix: 'BL-', logo: '', bank: '', terms: 'Goods once sold will not be taken back.', openCash: 0, taxMode: 'regular', compRate: 1, fyNum: true, lut: false, lutNo: '', lutDate: '', turnover: 0, signatory: '' });
 const DEF_SETTINGS = () => ({ setupDone: false, company: DEF_CO(), pin: '', counters: {} });
 let CACHE = null;
@@ -246,20 +246,112 @@ function upgradeSettings(s) {
 }
 async function loadAll() {
   S.settings = upgradeSettings(await DB.get('kv', 'settings'));
-  S.items = await DB.all('items'); S.parties = await DB.all('parties'); S.vouchers = await DB.all('vouchers');
-  dirty();
+  S.items = await DB.all('items'); S.parties = await DB.all('parties');
+  const allV = await DB.all('vouchers'); S.vouchers = allV.filter(v => v.type !== AUD_T); S.audit = allV.filter(v => v.type === AUD_T);
+  AUD.snap = clone(S.settings); dirty();
 }
-async function saveSettings() { S.settings.updatedAt = Date.now(); await DB.put('kv', S.settings, 'settings'); clPushSettings(); }
+async function saveSettings() { S.settings.updatedAt = Date.now(); await DB.put('kv', S.settings, 'settings'); clPushSettings(); await audSettings(); }
 async function saveRec(store, rec) {
   if (!canSave(store, rec)) { denyToast(); throw new Error('role'); }
+  if (store === 'vouchers' && rec.type === AUD_T) throw new Error('audit');
+  const old = await DB.get(store, rec.id);
+  if (store === 'vouchers') { const le = lockErr(rec, old); if (le) { toast(le); throw new Error('locked'); } }
   if (store === 'vouchers' && rec.entries) { const er = acvErr(rec); if (er) { toast(er); throw new Error(er); } }
   rec.updatedAt = Date.now(); if (!rec.createdAt) rec.createdAt = rec.updatedAt;
   await DB.put(store, rec);
   const arr = S[store]; const i = arr.findIndex(x => x.id === rec.id);
   if (i >= 0) arr[i] = rec; else arr.push(rec);
   dirty(); clPushRec(store, rec);
+  if (!old) await audLog('Create', store, rec, audSum(store, rec));
+  else { const d = audDiff(old, rec); if (d) await audLog('Edit', store, rec, d); }
 }
-async function delRec(store, id) { if (clOn() && !can('delete')) { denyToast(); throw new Error('role'); } await DB.del(store, id); S[store] = S[store].filter(x => x.id !== id); dirty(); clPushDel(store, id); }
+async function delRec(store, id) {
+  if (clOn() && !can('delete')) { denyToast(); throw new Error('role'); }
+  const old = S[store].find(x => x.id === id) || await DB.get(store, id);
+  if (!old && store === 'vouchers' && S.audit.some(a => a.id === id)) throw new Error('audit');
+  if (store === 'vouchers' && old) { if (old.type === AUD_T) throw new Error('audit'); const le = lockErr(old); if (le) { toast(le); throw new Error('locked'); } }
+  await DB.del(store, id); S[store] = S[store].filter(x => x.id !== id); dirty(); clPushDel(store, id);
+  if (old) await audLog('Delete', store, old, audSum(store, old));
+}
+
+/* ================= Audit trail (edit log) =================
+   Stored as hidden records of type 'audit' in the vouchers store / cloud collection (no rules change needed).
+   They are split into S.audit on load and on sync, so no bill list, report, count, numbering or export ever sees them.
+   There is no code path that edits or deletes an audit record. */
+const AUD_T = 'audit';
+const AUD = { snap: null };
+const AUD_RT = { items: 'Item', parties: 'Party', vouchers: 'Voucher' };
+const AUD_SKIP = new Set(['updatedAt', 'createdAt', 'id', 'counters', 'pin', 'taxIn', 'posC', 'setupDone']);
+const AUD_BIG = new Set(['photo', 'img', 'logo', 'company.logo', 'billImg']);
+function audWho() { if (!clOn()) return 'This device'; return (CL.cfg.email || CL.cfg.name || 'User') + ' (' + (ROLES[ROLE()] || ROLE()) + ')'; }
+function audVal(x) { if (x === undefined || x === null || x === '') return '—'; if (typeof x === 'boolean') return x ? 'Yes' : 'No'; if (typeof x === 'number') return String(r2(x)); const t = String(x); return t.length > 40 ? t.slice(0, 37) + '…' : t; }
+function audLbl(k) { if (k.startsWith('accOpen.')) { const id = k.slice(8); let n = id; try { n = accName(id); } catch (e) { } return 'Opening balance › ' + n; } if (k === 'company.openCash') return 'Opening cash'; return k.replace(/^company\./, '').replace(/\./g, ' › ').replace(/([a-z])([A-Z])/g, '$1 $2').replace(/^./, c => c.toUpperCase()); }
+function audFlat(o, pre, out) {
+  for (const k of Object.keys(o || {})) {
+    const path = pre ? pre + '.' + k : k; if (AUD_SKIP.has(path)) continue; const v = o[k];
+    if (AUD_BIG.has(path) || AUD_BIG.has(k)) { out[path] = { big: v ? String(v).length + ':' + String(v).slice(-24) : '' }; continue; }
+    if (Array.isArray(v)) out[path] = v; else if (v && typeof v === 'object') audFlat(v, path, out); else out[path] = v;
+  }
+  return out;
+}
+function audLines(L) { return (L || []).map(l => `${l.name || (item(l.itemId) || {}).name || 'item'}×${qf(l.qty)}@${r2(num(l.rate))}`).join(', '); }
+function audArr(k, x, y) {
+  if (JSON.stringify(x) === JSON.stringify(y)) return '';
+  const short = t => t.length > 90 ? t.slice(0, 87) + '…' : t;
+  if (k === 'lines') { const a = audLines(x), b = audLines(y); return a === b ? '' : `Items: ${short(a || '—')} → ${short(b || '—')}`; }
+  if (k === 'entries') { const f = E => E.map(e => `${accName(e.a)} ${num(e.dr) ? 'Dr ' + r2(num(e.dr)) : 'Cr ' + r2(num(e.cr))}`).join(', '); return `Entries: ${short(f(x))} → ${short(f(y))}`; }
+  const obj = a => a.length && a.every(o => o && typeof o === 'object' && 'id' in o);
+  if (obj(x) || obj(y)) {
+    const X = new Map(x.map(o => [o.id, o])), Y = new Map(y.map(o => [o.id, o])), r = [];
+    Y.forEach((o, id) => { if (!X.has(id)) r.push('added ' + (o.name || id)); else { const d = audDiff(X.get(id), o); if (d) r.push((o.name || id) + ' (' + d + ')'); } });
+    X.forEach((o, id) => { if (!Y.has(id)) r.push('removed ' + (o.name || id)); });
+    return r.length ? audLbl(k) + ': ' + r.join(', ') : '';
+  }
+  return `${audLbl(k)}: ${short(x.join(', ') || '—')} → ${short(y.join(', ') || '—')}`;
+}
+function audDiff(a, b) {
+  const A = audFlat(a, '', {}), B = audFlat(b, '', {}), out = [];
+  for (const k of new Set([...Object.keys(A), ...Object.keys(B)])) {
+    const x = A[k], y = B[k];
+    const isB = o => o && typeof o === 'object' && !Array.isArray(o) && 'big' in o;
+    if (isB(x) || isB(y)) { if ((isB(x) ? x.big : '') !== (isB(y) ? y.big : '')) out.push(audLbl(k) + (isB(y) && y.big ? ' changed' : ' removed')); continue; }
+    if (Array.isArray(x) || Array.isArray(y)) { const r = audArr(k, x || [], y || []); if (r) out.push(r); continue; }
+    if (audVal(x) !== audVal(y)) out.push(`${audLbl(k)}: ${audVal(x)} → ${audVal(y)}`);
+  }
+  const t = out.join('; '); return t.length > 600 ? t.slice(0, 597) + '…' : t;
+}
+function audRef(store, r) { if (store === 'vouchers') return `${(VT[r.type] || {}).hi || r.type} ${r.no || ''}`.trim(); return r.name || r.id; }
+function audSum(store, r) {
+  if (store === 'vouchers') { const p = vParty(r); return [`Date ${fd(r.date)}`, `Amount ${inr(vAmount(r))}`, p ? 'Party ' + p : '', r.lines && r.lines.length ? 'Items: ' + audLines(r.lines).slice(0, 120) : ''].filter(Boolean).join('; '); }
+  if (store === 'items') return [`Sale rate ${r2(num(r.saleRate))}`, `Purchase rate ${r2(num(r.purchaseRate))}`, `GST ${num(r.gst)}%`, `Opening stock ${qf(r.openStock)}`].join('; ');
+  if (store === 'parties') return [r.gstin ? 'GSTIN ' + r.gstin : '', r.phone ? 'Phone ' + r.phone : '', `Opening balance ${r2(num(r.openBal))}`].filter(Boolean).join('; ');
+  return '';
+}
+async function audLog(act, store, rec, ch, rt, ref) {
+  const t = Date.now(), a = { id: 'au_' + uid(), type: AUD_T, at: t, date: today(), who: audWho(), act, rt: rt || AUD_RT[store] || store, sub: store === 'vouchers' ? rec.type : '', ref: rec ? audRef(store, rec) : (ref || ''), rid: rec ? rec.id : '', ch: ch || '', updatedAt: t, createdAt: t };
+  S.audit.push(a); try { await DB.put('vouchers', a); } catch (e) { console.warn('audit', e); } clPushRec('vouchers', a); return a;
+}
+// settings diff grouped: ledgers / opening balances / period lock / other settings
+async function audSettings() {
+  const prev = AUD.snap || {}, cur = S.settings; AUD.snap = clone(cur);
+  const grp = k => /^(ledgers|expCats)/.test(k) ? 'Ledger' : /^(accOpen|company\.openCash)/.test(k) ? 'Opening balance' : /^(lockDate|gstFiled)/.test(k) ? 'Period lock' : 'Settings';
+  const A = audFlat(prev, '', {}), B = audFlat(cur, '', {}), G = {};
+  for (const k of new Set([...Object.keys(A), ...Object.keys(B)])) { const g = grp(k); (G[g] = G[g] || [{}, {}]); const ub = o => (o && typeof o === 'object' && !Array.isArray(o) && 'big' in o) ? (o.big || '') : o; if (k in A) setPath(G[g][0], k, ub(A[k])); if (k in B) setPath(G[g][1], k, ub(B[k])); }
+  for (const [g, [x, y]] of Object.entries(G)) {
+    const d = audDiff(x, y); if (!d) continue;
+    let act = 'Edit', ref = g === 'Settings' ? 'Business settings' : g;
+    if (g === 'Period lock') { const o = prev.lockDate || '', n = cur.lockDate || ''; act = o === n ? 'GST filed mark' : (!n || (o && n < o)) ? 'Unlock' : 'Lock'; ref = n ? 'Books locked up to ' + fd(n) : 'Books unlocked'; }
+    if (g === 'Ledger') { const lx = (prev.ledgers || []).length, ly = (cur.ledgers || []).length; act = ly > lx ? 'Create' : ly < lx ? 'Delete' : 'Edit'; }
+    await audLog(act, 'settings', null, d, g === 'Settings' ? 'Settings' : g, ref);
+  }
+}
+/* ================= Period lock ================= */
+const lockDt = () => (S.settings && S.settings.lockDate) || '';
+function lockErr(v, old) { const L = lockDt(); if (!L) return ''; if ((v && v.date && v.date <= L) || (old && old.date && old.date <= L)) return `Books are locked up to ${fd(L)}. Entries dated on or before this cannot be added, changed or deleted. The Owner can unlock in Settings.`; return ''; }
+async function setLock(d) { if (!can('company')) return denyToast(); if (!d) return toast('Select a date'); S.settings.lockDate = d; await saveSettings(); toast('Books locked up to ' + fd(d) + ' ✓'); if (parseHash().parts[0] === 'settings') render(); }
+async function unlockBooks(sure) { if (!can('company')) return denyToast(); if (!lockDt()) return; if (!sure && !(await ask(`Unlock the books? Entries up to ${fd(lockDt())} can be changed again. This is recorded in the audit trail.`, { ok: 'Unlock', danger: true }))) return; S.settings.lockDate = ''; await saveSettings(); toast('Books unlocked'); if (parseHash().parts[0] === 'settings') render(); }
+async function markFiled(m, on) { if (!can('company')) return denyToast(); const g = { ...(S.settings.gstFiled || {}) }; if (on) g[m] = true; else delete g[m]; S.settings.gstFiled = g; await saveSettings(); }
+window.addEventListener('unhandledrejection', e => { const m = e.reason && e.reason.message; if (m === 'locked' || m === 'role' || m === 'audit') e.preventDefault(); });
 const item = id => S.items.find(x => x.id === id);
 const party = id => S.parties.find(x => x.id === id);
 const vch = id => S.vouchers.find(x => x.id === id);
@@ -722,6 +814,7 @@ function route() {
       case 'tax': return vTax();
       case 'acv': return vAcvForm(b, null);
       case 'settings': return vSettings();
+      case 'audit': return vAudit(b);
       default: go('home');
     }
   } catch (e) { console.warn(e); $('#main').innerHTML = emptyBox('⚠️', 'Something went wrong', esc(e.message)); }
@@ -1032,7 +1125,7 @@ function exportLedger(id) {
 /* ================= More ================= */
 function vMore() {
   hdr('More', { right: searchBtn() });
-  const m = [['reports', '📊', 'Reports'], ['exp', '💸', 'Expenses'], ['prod', '🏭', 'Production'], ['bill?f=quote', '📝', 'Quotations'], ['bill?f=pay', '💰', 'Payments'], ['bill?f=ret', '↩', 'Returns / CN / DN'], ...(taxMode() === 'regular' ? [['r/gstr1', '📤', 'GSTR-1'], ['r/gstr3b', '🧮', 'GSTR-3B']] : taxMode() === 'composition' ? [['r/cmp08', '🧾', 'CMP-08']] : []), ['r/pl', '📈', 'Profit & Loss'], ['r/bs', '🏛', 'Balance Sheet'], ['accounts', '📚', 'Accounts'], ['r/tb', '⚖️', 'Trial Balance'], ['brs', '🏦', 'Bank Reconciliation'], ['tax', '💡', 'Tax Saving'], ['settings', '⚙️', 'Settings & Backup']];
+  const m = [['reports', '📊', 'Reports'], ['exp', '💸', 'Expenses'], ['prod', '🏭', 'Production'], ['bill?f=quote', '📝', 'Quotations'], ['bill?f=pay', '💰', 'Payments'], ['bill?f=ret', '↩', 'Returns / CN / DN'], ...(taxMode() === 'regular' ? [['r/gstr1', '📤', 'GSTR-1'], ['r/gstr3b', '🧮', 'GSTR-3B']] : taxMode() === 'composition' ? [['r/cmp08', '🧾', 'CMP-08']] : []), ['r/pl', '📈', 'Profit & Loss'], ['r/bs', '🏛', 'Balance Sheet'], ['accounts', '📚', 'Accounts'], ['r/tb', '⚖️', 'Trial Balance'], ['brs', '🏦', 'Bank Reconciliation'], ['tax', '💡', 'Tax Saving'], ['audit', '🕵', 'Audit Trail'], ['settings', '⚙️', 'Settings & Backup']];
   $('#main').innerHTML = `<div class="mgrid">${m.map(([h, i, l]) => `<button onclick="go('${h}')"><span class="i">${i}</span>${l}</button>`).join('')}</div>
   <div class="card"><h3>New Entry</h3><div class="btns"><button class="btn" onclick="go('new/sale')">+ Sales Invoice</button><button class="btn sec" onclick="go('new/purchase')">+ Purchase Bill</button><button class="btn ghost" onclick="go('new/quote')">+ Quotation</button></div></div>
   <div class="card"><div class="kv"><span>Business</span><b>${esc(co().name)}</b></div><div class="kv"><span>Tax mode</span><span id="moreTax">${TAXMODES.find(x => x[0] === taxMode())[1]}</span></div>${isGstCo() ? `<div class="kv"><span>GSTIN</span><span>${esc(co().gstin || '—')}</span></div>` : ''}<div class="kv"><span>Data</span><span>${S.items.length} items · ${S.parties.length} parties · ${S.vouchers.length} entries</span></div></div>`;
@@ -1237,6 +1330,7 @@ async function saveVoucher() {
   const v = F.v, t = VT[v.type];
   v.no = (v.no || '').trim(); if (!v.no) return toast('Enter a number');
   if (!v.date) return toast('Select a date');
+  { const le = lockErr(v, F.isNew ? null : vch(v.id)); if (le) return toast(le); }
   if (S.vouchers.some(x => x.id !== v.id && x.type === v.type && x.no === v.no)) return toast(`${v.no} already exists — change the number`);
   if (GST_DOC.has(v.type) && isGstCo() && (v.no.length > 16 || !/^[A-Za-z0-9\/-]+$/.test(v.no))) return toast('Invoice number: max 16 characters, only letters, digits, / and - (GST rule 46)');
   if (!v.partyId && !WALK_T.includes(v.type)) return toast('Select a party');
@@ -1357,6 +1451,9 @@ function vView(id) {
     h += `<div class="card">${rows.map(([k, x]) => `<div class="kv"><span>${k}</span><span style="text-align:right">${x}</span></div>`).join('')}</div>
     <div class="btns">${v.type === 'payin' || v.type === 'payout' ? `<button class="btn ghost" onclick="shareV('${v.id}')">💬 WhatsApp</button>` : ''}<button class="btn sec" onclick="go('edit/${v.id}')">✎ Edit</button><button class="btn dan" onclick="delV('${v.id}')">🗑 Delete</button></div>`;
   }
+  const lk = lockErr(v), hist = S.audit.filter(a => a.rid === v.id).length;
+  h = (lk ? `<div class="card" id="lockBanner" style="border-left:4px solid var(--bad)"><b>🔒 Locked period</b><div class="mu" style="font-size:12.5px">Books are locked up to ${fd(lockDt())}. This entry cannot be changed or deleted.</div></div>` : '') + h +
+    (can('reports') ? `<div class="btns" style="margin-top:10px"><button class="btn ghost sm" id="histBtn" onclick="go('audit/${v.id}')">🕓 History (${hist})</button></div>` : '');
   $('#main').innerHTML = h;
   const cs = $('#copySel'); if (cs) cs.onchange = () => { const w = $('.inv-wrap'); const k = cs.value; w.innerHTML = invoiceHTML(v, k && k !== 'all' ? COPIES.find(x => x[0] === k)[1] : k === 'all' ? COPIES[0][1] : ''); fitInv(); };
   fitInv();
@@ -1384,7 +1481,7 @@ function shareV(id) {
   openWA(p ? p.phone : '', txt);
 }
 async function delV(id) {
-  const v = vch(id); if (!v) return;
+  const v = vch(id); if (!v) return; { const le = lockErr(v); if (le) return toast(le); }
   if (!(await ask(`Delete ${VT[v.type].hi} ${esc(v.no)}? Stock and party balances will be updated.`, { ok: 'Delete', danger: true }))) return;
   await delRec('vouchers', id);
   if (v.fromQuote) { const qv = vch(v.fromQuote); if (qv) { delete qv.converted; delete qv.convertedNo; await saveRec('vouchers', qv); } }
@@ -2157,6 +2254,13 @@ function gstr1Json(G) {
   if (G.docs.length) j.doc_issue = { doc_det: G.docs };
   return j;
 }
+// Expense GST credit split by head: all = claimable + blocked (reported in 4(A)(5)), blk = blocked part reversed in 4(B)(1) (sec 17(5) / marked not claimable)
+function expITC(v) {
+  const sp = expSplit(v); if (sp.personal || !(sp.itc > 0 || sp.blocked > 0)) return null;
+  const hd = x => { x = r2(x); if (expInter(v)) return { txval: 0, iamt: x, camt: 0, samt: 0, csamt: 0 }; const h = r2(x / 2); return { txval: 0, iamt: 0, camt: h, samt: r2(x - h), csamt: 0 }; };
+  const all = hd(sp.itc + sp.blocked); all.txval = r2((sp.amount - sp.gst) * sp.pct / 100);
+  return { sp, all, blk: hd(sp.blocked), el: sp.itc, bl: sp.blocked, inter: expInter(v) };
+}
 function gstr3bData(vs) {
   const z = () => ({ txval: 0, iamt: 0, camt: 0, samt: 0, csamt: 0 });
   const add = (a, s, g) => { ['txval', 'iamt', 'camt', 'samt', 'csamt'].forEach(f => a[f] += s * num(g[f])); };
@@ -2178,6 +2282,7 @@ function gstr3bData(vs) {
       if (v.rcm) { add(T.d, s, tx); add(T.itcRcm, s, tx); } else add(T.itcOth, s, tx);
       if (v.itc === false) add(T.itcRev, s, tx);
     }
+    if (v.type === 'exp' && taxMode() === 'regular') { const e = expITC(v); if (e) { add(T.itcOth, 1, e.all); if (e.bl) add(T.itcRev, 1, e.blk); } }
   }
   const R = o => { ['txval', 'iamt', 'camt', 'samt', 'csamt'].forEach(f => o[f] = r2(o[f])); return o; };
   ['a', 'b', 'c', 'd', 'e', 'rcmOut', 'itcRcm', 'itcOth', 'itcRev'].forEach(k => R(T[k])); T.est = r2(T.est);
@@ -2232,9 +2337,10 @@ function buildReport(name) {
     R.sections.push({ title: 'GSTR-1: B2C (unregistered)', cols, rows: b2c, total: tot(b2c) });
     if (notes.length) R.sections.push({ title: 'Credit / Debit Notes & Returns (net)', cols, rows: notes, total: tot(notes) });
     const T = rows => { const t = tot(rows); return [t[2], t[3], t[4], t[5], t[6]]; };
-    const out = T(b2b).map((x, i) => r2(x + T(b2c)[i] + T(notes)[i])), inn = T(inp);
+    const ex = [0, 0, 0, 0, 0]; if (taxMode() === 'regular') vs.filter(v => v.type === 'exp').forEach(v => { const e = expITC(v); if (!e || !e.el) return; const f = e.el / (e.el + e.bl); ex[0] += e.all.camt * f; ex[1] += e.all.samt * f; ex[2] += e.all.iamt * f; }); ex[4] = ex[0] + ex[1] + ex[2];
+    const out = T(b2b).map((x, i) => r2(x + T(b2c)[i] + T(notes)[i])), inn = T(inp).map((x, i) => r2(x + ex[i]));
     const net = out.map((x, i) => r2(x - inn[i]));
-    R.sections.push({ title: 'GSTR-3B: Output vs Input Tax', cols: [C_('Detail'), C_('CGST', 1), C_('SGST', 1), C_('IGST', 1), C_('Cess', 1), C_('Total', 1)], rows: [['Output tax (sales ± notes)', ...out], ['Eligible ITC (purchases − returns)', ...inn]], total: ['Net (+ payable / − excess ITC)', ...net] });
+    R.sections.push({ title: 'GSTR-3B: Output vs Input Tax', cols: [C_('Detail'), C_('CGST', 1), C_('SGST', 1), C_('IGST', 1), C_('Cess', 1), C_('Total', 1)], rows: [['Output tax (sales ± notes)', ...out], ['Eligible ITC (purchases − returns + expense GST credit)', ...inn]], total: ['Net (+ payable / − excess ITC)', ...net] });
     R.cards = [['Output Tax', inr(out[4])], ['Input Tax (ITC)', inr(inn[4])], [net[4] >= 0 ? 'GST Payable' : 'Excess ITC', inr(Math.abs(net[4]))]];
     R.note = 'Quick overview without cross-head set-off. Use the GSTR-3B report for the set-off and cash payable. Verify with your CA before filing.';
   }
@@ -2289,9 +2395,13 @@ function buildReport(name) {
     const list = vs.filter(v => (v.type === 'purchase' || v.type === 'pret') && vMode(v) === 'regular');
     const rows = list.map(v => { const s = v.type === 'purchase' ? 1 : -1, p = party(v.partyId); const tx = r2(num(v.igst) + num(v.cgst) + num(v.sgst) + num(v.cess)); return [fd(v.date), p ? p.name : '', p ? p.gstin || 'Unregistered' : '', v.billNo || v.no, v.type === 'purchase' ? 'Purchase' : 'Return', s * num(v.taxable), s * num(v.igst), s * num(v.cgst), s * num(v.sgst), s * num(v.cess), s * tx, v.itc === false ? 'No' : 'Yes', v.rcm ? 'Yes' : 'No']; });
     R.sections.push({ csv: 1, cols: [C_('Date'), C_('Supplier'), C_('GSTIN'), C_('Bill No'), C_('Type'), C_('Taxable', 1), C_('IGST', 1), C_('CGST', 1), C_('SGST', 1), C_('Cess', 1), C_('Total Tax', 1), C_('ITC Eligible'), C_('RCM')], rows, total: ['Total', '', '', '', '', ...[5, 6, 7, 8, 9, 10].map(i => sumCol(rows, i)), '', ''] });
+    vs.filter(v => v.type === 'exp' && taxMode() === 'regular').forEach(v => { const e = expITC(v); if (!e) return; const tx = r2(e.all.txval), share = (x, t) => t ? r2(x * (e.el / t)) : 0, tot = r2(e.el + e.bl);
+      const mk = (amt, yes, lbl) => { const f = tot ? amt / tot : 0, I = r2(e.all.iamt * f), C = r2(e.all.camt * f), S2 = r2(e.all.samt * f); return [fd(v.date), v.vendor || v.category, v.vgstin || 'Unregistered', v.billNo || v.no, lbl, r2(tx * f), I, C, S2, 0, r2(I + C + S2), yes, 'No']; };
+      if (e.el > 0) rows.push(mk(e.el, 'Yes', 'Expense — ' + v.category)); if (e.bl > 0) rows.push(mk(e.bl, 'No', 'Expense — ' + v.category + (catMeta(v.category).itc === 'bl' ? ' (blocked 17(5))' : ' (not claimable)'))); });
+    if (R.sections[0]) R.sections[0].total = ['Total', '', '', '', '', ...[5, 6, 7, 8, 9, 10].map(i => sumCol(rows, i)), '', ''];
     const el = r2(rows.filter(r => r[11] === 'Yes').reduce((s, r) => s + r[10], 0)), inel = r2(rows.filter(r => r[11] === 'No').reduce((s, r) => s + r[10], 0)), rc = r2(rows.filter(r => r[12] === 'Yes').reduce((s, r) => s + r[10], 0));
     R.cards = [['Eligible ITC', inr(el)], ['Ineligible ITC', inr(inel)], ['RCM tax (claimable after payment)', inr(rc)]];
-    R.note = 'Unregistered suppliers do not give ITC unless the purchase is under RCM. Reconcile with GSTR-2B monthly.';
+    R.note = 'Includes GST credit on expense bills (business share only). Blocked credit under section 17(5) is shown as ineligible. Unregistered suppliers do not give ITC unless the purchase is under RCM. Reconcile with GSTR-2B monthly.';
   }
   if (name === 'hsn') {
     R.title = 'HSN-wise Summary';
@@ -2524,6 +2634,40 @@ function exportJson(name) {
 
 /* ================= Settings ================= */
 function taxModeSeg(id, val) { return `<div class="seg" id="${id}">${TAXMODES.map(([k, l]) => `<button type="button" data-v="${k}" class="${val === k ? 'on' : ''}" onclick="segPick(this)">${l}</button>`).join('')}</div>`; }
+/* ================= Audit Trail screen ================= */
+const AUDF = { from: '', to: '', who: '', rt: '', act: '' };
+const audTime = a => { const d = new Date(a.at); return `${fd(iso(d))} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`; };
+function audRows(f = AUDF, rid) {
+  return S.audit.filter(a => (!rid || a.rid === rid) && (!f.from || iso(new Date(a.at)) >= f.from) && (!f.to || iso(new Date(a.at)) <= f.to) && (!f.who || a.who === f.who) && (!f.rt || a.rt === f.rt) && (!f.act || a.act === f.act)).sort((a, b) => b.at - a.at);
+}
+function vAudit(rid) {
+  const rec = rid && (vch(rid) || item(rid) || party(rid));
+  const lastRef = rid && (S.audit.filter(a => a.rid === rid).sort((a, b) => b.at - a.at)[0] || {}).ref;
+  hdr(rid ? 'History' : 'Audit Trail', { back: true });
+  const opts = (k, lbl) => `<option value="">${lbl}</option>` + [...new Set(S.audit.map(a => a[k]).filter(Boolean))].sort().map(x => `<option ${AUDF[k] === x ? 'selected' : ''}>${esc(x)}</option>`).join('');
+  const rows = audRows(rid ? {} : AUDF, rid);
+  const tg = a => /Delete|Unlock/.test(a) ? 'r' : a === 'Create' || a === 'Lock' ? 'g' : 'w';
+  $('#main').innerHTML = `${rid ? `<div class="card"><b>${esc(rec ? (rec.no ? audRef('vouchers', rec) : rec.name) : (lastRef || 'Deleted record'))}</b><div class="mu" style="font-size:12.5px">Every change to this record, newest first.</div></div>` : `<div class="card" id="audFilters"><div class="f2"><div class="f"><label>From</label><input type="date" id="af_from" value="${AUDF.from}"></div><div class="f"><label>To</label><input type="date" id="af_to" value="${AUDF.to}"></div></div>
+    <div class="f2"><div class="f"><label>User</label><select id="af_who">${opts('who', 'All users')}</select></div><div class="f"><label>Record type</label><select id="af_rt">${opts('rt', 'All types')}</select></div></div>
+    <div class="f"><label>Action</label><select id="af_act">${opts('act', 'All actions')}</select></div>
+    <div class="btns"><button class="btn sec sm" id="audCsv" onclick="exportAudit()">⬇ CSV</button><button class="btn ghost sm" onclick="Object.keys(AUDF).forEach(k => AUDF[k] = '');render()">Clear filters</button></div></div>`}
+  <p class="mu" style="font-size:12px;margin:0 0 8px">${rows.length} entr${rows.length === 1 ? 'y' : 'ies'} · The audit trail is a permanent record: entries cannot be edited or deleted by anyone.</p>
+  <div id="audList">${rows.length ? rows.slice(0, 500).map(a => `<div class="card aud" style="padding:10px 12px;margin-bottom:8px"><div style="display:flex;justify-content:space-between;gap:8px"><b>${esc(a.rt)}${a.ref ? ' · ' + esc(a.ref) : ''}</b><span class="tag ${tg(a.act)}">${esc(a.act)}</span></div><div class="mu" style="font-size:12px">${audTime(a)} · ${esc(a.who)}</div>${a.ch ? `<div style="font-size:12.5px;margin-top:4px;word-break:break-word">${esc(a.ch)}</div>` : ''}${!rid && a.rid && a.rt !== 'Settings' ? `<button class="btn ghost sm" style="margin-top:6px" onclick="go('audit/${a.rid}')">History</button>` : ''}</div>`).join('') : emptyBox('🕵', 'No audit entries', '<p class="mu">Changes to items, parties, entries, ledgers and settings appear here.</p>')}</div>`;
+  if (!rid) ['from', 'to', 'who', 'rt', 'act'].forEach(k => { const el = $('#af_' + k); el.onchange = () => { AUDF[k] = el.value; render(); }; });
+}
+function exportAudit(rid) {
+  const rows = audRows(rid ? {} : AUDF, rid);
+  download(`Audit_Trail_${today()}.csv`, toCSV([['Date & time', 'User', 'Action', 'Record type', 'Record', 'Changes'], ...rows.map(a => [audTime(a), a.who, a.act, a.rt, a.ref, a.ch])]), 'text/csv'); toast('Audit trail CSV is downloading');
+}
+function lockCardHTML() {
+  const L = lockDt(), own = can('company'), fy = fyStart(), F = S.settings.gstFiled || {}, ms = [];
+  for (let d = fy; d <= today(); d = addDays(monthEnd(d), 1)) ms.push(d.slice(0, 7));
+  const pf = fyStart(addDays(fy, -1)); for (let d = pf; d < fy; d = addDays(monthEnd(d), 1)) ms.unshift(d.slice(0, 7));
+  return `<div class="sect">Period Lock</div><div class="card" id="lockCard"><div class="kv"><span>Books locked up to</span><b id="lockState">${L ? fd(L) + ' 🔒' : 'Not locked'}</b></div>
+  <p class="mu" style="font-size:12px;margin:6px 0 10px">Lock the books after you file GST returns or close the year. Entries dated on or before the lock date cannot be added, changed or deleted.${own ? '' : ' Only the Owner can change this.'}</p>
+  ${own ? `<div class="f2"><div class="f"><label>Lock up to</label><input type="date" id="lk_date" value="${L}"></div><div class="f" style="display:flex;align-items:flex-end;gap:6px"><button class="btn sm" id="lk_set" onclick="setLock($('#lk_date').value)">Lock</button>${L ? `<button class="btn dan sm" id="lk_un" onclick="unlockBooks()">Unlock</button>` : ''}</div></div>` : ''}
+  ${isGstCo() ? `<details><summary style="font-size:13px;cursor:pointer">GST return filed (by month)</summary><div style="display:grid;grid-template-columns:1fr 1fr;gap:2px;margin-top:6px">${ms.map(m => `<label class="ck" style="margin:0"><input type="checkbox" data-m="${m}" ${F[m] ? 'checked' : ''} ${own ? '' : 'disabled'} onchange="markFiled('${m}', this.checked)"> <span>${MON[+m.slice(5) - 1]} ${m.slice(0, 4)}</span></label>`).join('')}</div></details>` : ''}</div>`;
+}
 function vSettings() {
   hdr('Settings', { back: true });
   const c = co(), tm = taxMode();
@@ -2554,6 +2698,7 @@ function vSettings() {
   <button class="btn full" id="s_save">Save Details</button></div>
   <div class="sect">Security</div><div class="card"><div class="kv"><span>App PIN Lock</span><b id="pinState">${S.settings.pin ? 'ON 🔒' : 'OFF'}</b></div>
   <div class="btns" style="margin-top:10px">${S.settings.pin ? `<button class="btn sec" onclick="lockScreen('set1')">Change PIN</button><button class="btn dan" onclick="removePin()">Remove PIN</button>` : `<button class="btn sec" id="setPinBtn" onclick="lockScreen('set1')">Set 4-digit PIN</button>`}</div></div>
+  ${lockCardHTML()}
   <div class="sect">Cloud / Login</div>${cloudCardHTML()}
   <div class="sect">Backup & Restore</div><div class="card"><p class="mu" style="margin:0 0 10px;font-size:13px">${clOn() ? 'Your data is on this phone and in the cloud. Still, download a backup every month and keep it safe.' : 'All data is stored only on this phone. Download a backup every week and keep it on Google Drive or email.'}</p>
   <div class="btns">${ROLE() !== 'viewer' || !clOn() ? `<button class="btn" onclick="backup()">⬇ Download Backup</button>` : ''}${can('restore') ? `<label class="btn ghost" style="margin:0" id="restoreBtn">⬆ Restore<input type="file" accept=".json,application/json" hidden onchange="restore(this)"></label>` : ''}</div></div>
@@ -2575,7 +2720,7 @@ function vSettings() {
   };
 }
 async function backup() {
-  const data = { app: 'erp-pwa', version: 1, exportedAt: new Date().toISOString(), settings: S.settings, items: S.items, parties: S.parties, vouchers: S.vouchers };
+  const data = { app: 'erp-pwa', version: 1, exportedAt: new Date().toISOString(), settings: S.settings, items: S.items, parties: S.parties, vouchers: S.vouchers, audit: S.audit };
   download(`LedgerOne_Backup_${(co().name || 'business').replace(/\W+/g, '_')}_${today()}.json`, JSON.stringify(data), 'application/json');
   toast('Backup is downloading');
 }
@@ -2586,21 +2731,27 @@ function restore(inp) {
     if (!d || d.app !== 'erp-pwa' || !Array.isArray(d.items) || !Array.isArray(d.parties) || !Array.isArray(d.vouchers) || !d.settings) return toast('This is not a LedgerOne backup');
     if (!(await ask(`Restoring will replace all current data with the backup (${d.items.length} items, ${d.parties.length} parties, ${d.vouchers.length} entries). Continue?`, { ok: 'Restore', danger: true }))) { inp.value = ''; return; }
     if (clOn() && !can('restore')) return denyToast();
-    const old = {}; for (const s of SYNC_COLS) old[s] = S[s].map(x => x.id);
+    const old = {}; for (const s of SYNC_COLS) old[s] = S[s].map(x => x.id); old.au = new Set(S.audit.map(a => a.id));
     if (clOn()) { const t = Date.now(); for (const s of SYNC_COLS) d[s].forEach(r => r.updatedAt = t); d.settings.updatedAt = t; d.settings.pin = S.settings.pin || ''; }
+    const keepA = new Map(S.audit.map(a => [a.id, a])); (Array.isArray(d.audit) ? d.audit : []).forEach(a => { if (a && a.type === AUD_T && a.id && !keepA.has(a.id)) keepA.set(a.id, a); });
+    d.vouchers = d.vouchers.filter(v => v.type !== AUD_T);
     for (const s of ['items', 'parties', 'vouchers']) { await DB.clear(s); await DB.bulk(s, d[s]); }
+    await DB.bulk('vouchers', [...keepA.values()]);
     await DB.put('kv', upgradeSettings(d.settings), 'settings'); await loadAll();
+    await audLog('Restore', 'settings', null, `Backup restored: ${d.items.length} items, ${d.parties.length} parties, ${d.vouchers.length} entries`, 'Data', 'Restore from backup');
+    if (clOn()) for (const a of S.audit) if (!old.au || !old.au.has(a.id)) await clPushRec('vouchers', a);
     if (clOn()) { for (const s of SYNC_COLS) { const keep = new Set(d[s].map(x => x.id)); for (const id of old[s]) if (!keep.has(id)) await clPushDel(s, id); for (const r of d[s]) await clPushRec(s, r); } await clPushSettings(); }
     toast('Restore complete ✓'); replaceTo('home');
   };
   rd.readAsText(f);
 }
 async function resetAll() {
-  if (!(await ask('All data (items, parties, bills) will be deleted permanently. Have you taken a backup?', { ok: 'Yes, Delete', danger: true }))) return;
+  if (!(await ask('All data (items, parties, bills) will be deleted permanently. Have you taken a backup?<br><br>The audit trail is <b>kept</b> — it cannot be deleted, and this deletion will be recorded in it.', { ok: 'Yes, Delete', danger: true }))) return;
+  const keepA = [...S.audit];
   if (!(await ask('Are you sure? This cannot be undone.', { ok: 'Delete', danger: true }))) return;
-  if (clOn()) { if (!can('reset')) return denyToast(); for (const s of SYNC_COLS) for (const r of S[s]) await clPushDel(s, r.id); for (const s of SYNC_COLS) await DB.clear(s); const keep = { ...DEF_SETTINGS(), updatedAt: Date.now() }; await DB.put('kv', keep, 'settings'); await loadAll(); await clPushSettings(); toast('All data deleted (cloud too)'); return replaceTo('home'); }
+  if (clOn()) { if (!can('reset')) return denyToast(); for (const s of SYNC_COLS) for (const r of S[s]) await clPushDel(s, r.id); for (const s of SYNC_COLS) await DB.clear(s); await DB.bulk('vouchers', keepA); const keep = { ...DEF_SETTINGS(), updatedAt: Date.now() }; await DB.put('kv', keep, 'settings'); await loadAll(); await clPushSettings(); await audLog('Delete all data', 'settings', null, 'All items, parties and entries deleted (cloud too)', 'Data', 'All data'); toast('All data deleted (cloud too)'); return replaceTo('home'); }
   for (const s of ['items', 'parties', 'vouchers', 'kv']) await DB.clear(s);
-  await loadAll(); toast('All data deleted'); replaceTo('home');
+  await DB.bulk('vouchers', keepA); await loadAll(); await audLog('Delete all data', 'settings', null, 'All items, parties, entries and settings deleted', 'Data', 'All data'); toast('All data deleted'); replaceTo('home');
 }
 
 /* ================= PIN lock ================= */
@@ -2660,6 +2811,7 @@ function routeAllowed(a, b) {
     case 'item': case 'partyf': return b !== 'new' || can('masters');
     case 'reports': return can('reports');
     case 'r': return can('reports');
+    case 'audit': return can('reports');
     default: return true;
   }
 }
@@ -2773,7 +2925,7 @@ window.addEventListener('offline', () => { CL.online = false; clStatus(); });
 /* ---------- remote merge (last write wins) ---------- */
 function localU(col, id) {
   if (col === 'settings') return S.settings.updatedAt || 0;
-  const r = S[col].find(x => x.id === id); const t = CL.tombs[col + '/' + id] || 0;
+  const r = S[col].find(x => x.id === id) || (col === 'vouchers' ? S.audit.find(x => x.id === id) : null); const t = CL.tombs[col + '/' + id] || 0;
   return Math.max(r ? (r.updatedAt || 0) : 0, t);
 }
 function applyRemote(col, id, val) {
@@ -2786,7 +2938,12 @@ function applyRemote(col, id, val) {
       if (val.deleted) return;
       let s; try { s = JSON.parse(val.j); } catch (e) { return; }
       S.settings = upgradeSettings({ ...DEF_SETTINGS(), ...s, pin: S.settings.pin || '', updatedAt: val.updatedAt });
-      await DB.put('kv', S.settings, 'settings');
+      await DB.put('kv', S.settings, 'settings'); AUD.snap = clone(S.settings);
+    } else if (col === 'vouchers' && (String(id).startsWith('au_') || S.audit.some(x => x.id === id))) {
+      if (val.deleted) return; // audit entries are never deleted
+      let rec; try { rec = JSON.parse(val.j); } catch (e) { return; } if (rec.type !== AUD_T) return;
+      rec.updatedAt = val.updatedAt; rec.id = id; await DB.put(col, rec);
+      const i = S.audit.findIndex(x => x.id === id); if (i >= 0) S.audit[i] = rec; else S.audit.push(rec); return;
     } else if (val.deleted) {
       await DB.del(col, id); S[col] = S[col].filter(x => x.id !== id); CL.tombs[qk] = val.updatedAt; await clSaveTombs();
     } else {
@@ -2868,7 +3025,7 @@ async function initialSync() {
       const snap = await base.child(col).once('value'); const remote = snap.val() || {};
       if (c.uploadLocal !== false) {
         if (col === 'settings') { const r = remote.main; if (S.settings.setupDone && (!r || (S.settings.updatedAt || 0) > r.updatedAt)) { if (!S.settings.updatedAt) S.settings.updatedAt = Date.now(); await DB.put('kv', S.settings, 'settings'); CL.q['settings/main'] = settingsPayload(); } }
-        else S[col].forEach(rec => { const r = remote[rec.id]; if (!rec.updatedAt) rec.updatedAt = Date.now(); if (!r || rec.updatedAt > r.updatedAt) CL.q[col + '/' + rec.id] = { updatedAt: rec.updatedAt, j: JSON.stringify(rec) }; });
+        else (col === 'vouchers' ? [...S.vouchers, ...S.audit] : S[col]).forEach(rec => { const r = remote[rec.id]; if (!rec.updatedAt) rec.updatedAt = Date.now(); if (!r || rec.updatedAt > r.updatedAt) CL.q[col + '/' + rec.id] = { updatedAt: rec.updatedAt, j: JSON.stringify(rec) }; });
       }
       for (const [id, val] of Object.entries(remote)) await applyRemote(col, id, val);
     }
