@@ -252,6 +252,7 @@ async function loadAll() {
 async function saveSettings() { S.settings.updatedAt = Date.now(); await DB.put('kv', S.settings, 'settings'); clPushSettings(); }
 async function saveRec(store, rec) {
   if (!canSave(store, rec)) { denyToast(); throw new Error('role'); }
+  if (store === 'vouchers' && rec.entries) { const er = acvErr(rec); if (er) { toast(er); throw new Error(er); } }
   rec.updatedAt = Date.now(); if (!rec.createdAt) rec.createdAt = rec.updatedAt;
   await DB.put(store, rec);
   const arr = S[store]; const i = arr.findIndex(x => x.id === rec.id);
@@ -347,7 +348,11 @@ const VT = {
   payin: { label: 'Payment Received', hi: 'Payment In', pre: () => 'RC-', party: -1, kind: 'cust', tag: 'g' },
   payout: { label: 'Payment Made', hi: 'Payment Out', pre: () => 'PY-', party: 1, kind: 'supp', tag: 'r' },
   prod: { label: 'Production Entry', hi: 'Production', pre: () => 'PR-', tag: 'x' },
-  exp: { label: 'Expense', hi: 'Expense', pre: () => 'EX-', tag: 'r' }
+  exp: { label: 'Expense', hi: 'Expense', pre: () => 'EX-', tag: 'r' },
+  rcpt: { label: 'Receipt', hi: 'Receipt', pre: () => 'RV-', tag: 'g', acc: 1 },
+  pmt: { label: 'Payment', hi: 'Payment', pre: () => 'PV-', tag: 'r', acc: 1 },
+  contra: { label: 'Contra (Cash / Bank)', hi: 'Contra', pre: () => 'CV-', tag: 'x', acc: 1 },
+  jv: { label: 'Journal', hi: 'Journal', pre: () => 'JV-', tag: 'x', acc: 1 }
 };
 /* Numbering: prefix + FY + '/' + serial when FY numbering is on (resets every 1 April). Non-GST bills use their own series. */
 function docPre(type, date, ng) { const b = type === 'sale' && ng ? (co().ngPrefix || 'BL-') : VT[type].pre(); return co().fyNum && GST_DOC.has(type) ? b + fyOf(date || today()) + '/' : b; }
@@ -368,7 +373,7 @@ function compute() {
   const stock = new Map(), bal = new Map();
   S.items.forEach(i => stock.set(i.id, num(i.openStock)));
   S.parties.forEach(p => bal.set(p.id, num(p.openBal)));
-  let cash = num(co().openCash), bank = 0;
+  let cash = num(co().openCash), bank = accOpen('bank') + (S.settings.ledgers || []).filter(l => l.group === 'bankg').reduce((s, l) => s + accOpen(l.id), 0);
   const addB = (id, x) => { if (id) bal.set(id, (bal.get(id) || 0) + x); };
   for (const v of S.vouchers) {
     const t = VT[v.type]; if (!t) continue;
@@ -377,6 +382,7 @@ function compute() {
       stock.set(v.outItem, (stock.get(v.outItem) || 0) + num(v.outQty));
       for (const l of v.lines || []) stock.set(l.itemId, (stock.get(l.itemId) || 0) - num(l.qty));
     }
+    if (v.entries) { for (const e of v.entries) { const x = num(e.dr) - num(e.cr); if (String(e.a).startsWith('p:')) addB(e.a.slice(2), x); else if (e.a === 'cash') cash += x; else if (ledGroup(e.a) === 'bankg') bank += x; } continue; }
     if (t.party) addB(v.partyId, t.party * num(t.lines ? v.total : v.amount));
     let inflow = 0; const pd = num(v.paid);
     if (v.type === 'payin') inflow = num(v.amount);
@@ -401,7 +407,7 @@ function stockAsOf(itemId, date) {
   return s;
 }
 function vAmount(v) { return num(v.lines ? v.total : v.type === 'prod' ? 0 : v.amount); }
-function vParty(v) { const p = v.partyId && party(v.partyId); return p ? p.name : (v.type === 'exp' ? (v.category || 'Expense') : v.type === 'prod' ? ((item(v.outItem) || {}).name || '') : (v.lines ? (v.walkName || 'Walk-in / Cash') : '')); }
+function vParty(v) { if (v.entries) return v.entries.map(e => accName(e.a)).slice(0, 2).join(' / '); const p = v.partyId && party(v.partyId); return p ? p.name : (v.type === 'exp' ? (v.category || 'Expense') : v.type === 'prod' ? ((item(v.outItem) || {}).name || '') : (v.lines ? (v.walkName || 'Walk-in / Cash') : '')); }
 
 /* Line + total calc (GST aware) */
 function vPos(v) { const p = v.partyId && party(v.partyId); if (!SALES_SIDE(v.type)) return (p && p.state) || co().state; return v.pos || (p && p.state) || co().state; }
@@ -576,7 +582,7 @@ function parseHash() {
   const q = {}; (qs || '').split('&').filter(Boolean).forEach(p => { const [k, v] = p.split('='); q[k] = decodeURIComponent(v || ''); });
   return { parts: path.split('/'), q };
 }
-const FORM_ROUTES = ['new', 'edit', 'pay', 'prod', 'exp'];
+const FORM_ROUTES = ['new', 'edit', 'pay', 'prod', 'exp', 'acv'];
 function render() {
   const { parts, q } = parseHash(); const a = parts[0];
   if (!FORM_ROUTES.includes(a) && q.ret !== '1') F = null;
@@ -600,13 +606,15 @@ function route() {
       case 'partyf': return vPartyForm(b, q);
       case 'p': return vLedger(b);
       case 'new': return vVoucherForm(b, null, q);
-      case 'edit': { const v = vch(b); if (!v) return go('bill'); if (VT[v.type].lines) return vVoucherForm(v.type, v, q); if (v.type === 'payin' || v.type === 'payout') return vPayForm(v.type, v, q); if (v.type === 'exp') return vExpForm(v); if (v.type === 'prod') return vProdForm(v); return; }
+      case 'edit': { const v = vch(b); if (!v) return go('bill'); if (v.entries) return vAcvForm(v.type, v); if (VT[v.type].lines) return vVoucherForm(v.type, v, q); if (v.type === 'payin' || v.type === 'payout') return vPayForm(v.type, v, q); if (v.type === 'exp') return vExpForm(v); if (v.type === 'prod') return vProdForm(v); return; }
       case 'v': return vView(b);
       case 'pay': return vPayForm(b, null, q);
       case 'exp': return b === 'new' ? vExpForm(null) : vExpList();
       case 'prod': return b === 'new' ? vProdForm(null) : vProdList();
       case 'reports': return vReports();
-      case 'r': return vReport(b);
+      case 'r': if (q.acc) LEDGER_ACC = q.acc; return vReport(b);
+      case 'accounts': return vAccounts();
+      case 'acv': return vAcvForm(b, null);
       case 'settings': return vSettings();
       default: go('home');
     }
@@ -740,11 +748,11 @@ function vSearch() {
 
 /* ================= Bills tab ================= */
 let BILLF = 'all';
-const BILL_FILTERS = [['all', 'All'], ['sale', 'Sales'], ['purchase', 'Purchases'], ['ret', 'Returns / Notes'], ['quote', 'Quotations'], ['pay', 'Payments']];
+const BILL_FILTERS = [['all', 'All'], ['sale', 'Sales'], ['purchase', 'Purchases'], ['ret', 'Returns / Notes'], ['quote', 'Quotations'], ['pay', 'Payments'], ['acc', 'Journal / Contra']];
 function vBills(q) {
   if (q.f) BILLF = q.f;
   hdr('Bills & Entries', { right: searchBtn() });
-  const match = v => BILLF === 'all' ? ['sale', 'purchase', 'sret', 'pret', 'cn', 'dn', 'quote', 'payin', 'payout'].includes(v.type) : BILLF === 'ret' ? ['sret', 'pret', 'cn', 'dn'].includes(v.type) : BILLF === 'pay' ? (v.type === 'payin' || v.type === 'payout') : v.type === BILLF;
+  const match = v => BILLF === 'all' ? ['sale', 'purchase', 'sret', 'pret', 'cn', 'dn', 'quote', 'payin', 'payout', ...ACC_T].includes(v.type) : BILLF === 'acc' ? ACC_T.includes(v.type) : BILLF === 'ret' ? ['sret', 'pret', 'cn', 'dn'].includes(v.type) : BILLF === 'pay' ? (v.type === 'payin' || v.type === 'payout') : v.type === BILLF;
   const list = S.vouchers.filter(v => match(v) && canSeeV(v)).sort(vSort);
   const tot = list.reduce((s, v) => s + vAmount(v), 0);
   $('#main').innerHTML = `<div class="chips">${BILL_FILTERS.map(([k, l]) => `<button class="chip ${k === BILLF ? 'on' : ''}" onclick="BILLF='${k}';go('bill?f=${k}')">${l}</button>`).join('')}</div>
@@ -753,7 +761,7 @@ function vBills(q) {
   fabBtn(newMenu);
 }
 function newMenu() {
-  const opts = [['new/sale', '₹', 'Sales Invoice'], ['new/purchase', '🛒', 'Purchase Bill'], ['new/quote', '📝', 'Quotation / Estimate'], ['pay/payin', '⬇', 'Payment In (received)'], ['pay/payout', '⬆', 'Payment Out (paid)'], ['new/sret', '↩', 'Sales Return (Credit Note)'], ['new/cn', '➖', 'Credit Note (price / discount)'], ['new/dn', '➕', 'Debit Note (extra charge)'], ['new/pret', '↪', 'Purchase Return (Debit Note)'], ['exp/new', '💸', 'Expense'], ['prod/new', '🏭', 'Production Entry']];
+  const opts = [['new/sale', '₹', 'Sales Invoice'], ['new/purchase', '🛒', 'Purchase Bill'], ['new/quote', '📝', 'Quotation / Estimate'], ['pay/payin', '⬇', 'Payment In (received)'], ['pay/payout', '⬆', 'Payment Out (paid)'], ['new/sret', '↩', 'Sales Return (Credit Note)'], ['new/cn', '➖', 'Credit Note (price / discount)'], ['new/dn', '➕', 'Debit Note (extra charge)'], ['new/pret', '↪', 'Purchase Return (Debit Note)'], ['exp/new', '💸', 'Expense'], ['prod/new', '🏭', 'Production Entry'], ['acv/rcpt', '📥', 'Receipt (accounts)'], ['acv/pmt', '📤', 'Payment (accounts)'], ['acv/contra', '🔁', 'Contra (cash / bank)'], ['acv/jv', '📓', 'Journal']];
   sheet('New Entry', `<div class="list">${opts.map(([h, i, l]) => `<div class="row" onclick="closeOv();go('${h}')"><div class="av">${i}</div><div class="m"><div class="t">${l}</div></div></div>`).join('')}</div>`);
 }
 
@@ -875,9 +883,11 @@ async function delParty(id) {
 function ledgerRows(pid, to) {
   const p = party(pid); const rows = []; let bal = num(p.openBal);
   rows.push({ date: '', label: 'Opening Balance', dr: bal > 0 ? bal : 0, cr: bal < 0 ? -bal : 0, bal });
-  const vs = S.vouchers.filter(v => v.partyId === pid && VT[v.type].party && (!to || v.date <= to)).sort((a, b) => a.date.localeCompare(b.date) || (a.createdAt || 0) - (b.createdAt || 0));
+  const vs = S.vouchers.filter(v => ((v.partyId === pid && VT[v.type].party) || (v.entries && v.entries.some(e => e.a === 'p:' + pid))) && (!to || v.date <= to)).sort((a, b) => a.date.localeCompare(b.date) || (a.createdAt || 0) - (b.createdAt || 0));
   for (const v of vs) {
-    const t = VT[v.type]; const amt = num(v.lines ? v.total : v.amount); const s = t.party * amt;
+    const t = VT[v.type];
+    if (v.entries) { v.entries.filter(e => e.a === 'p:' + pid).forEach(e => { bal += num(e.dr) - num(e.cr); rows.push({ v, date: v.date, label: `${t.hi} ${v.no}${v.narration ? ' — ' + v.narration : ''}`, dr: num(e.dr), cr: num(e.cr), bal }); }); continue; }
+    const amt = num(v.lines ? v.total : v.amount); const s = t.party * amt;
     bal += s; rows.push({ v, date: v.date, label: `${t.hi} ${v.no}${v.mode && !v.lines ? ' (' + v.mode + ')' : ''}`, dr: s > 0 ? amt : 0, cr: s < 0 ? amt : 0, bal });
     if (v.lines && num(v.paid)) { const ps = -t.party * num(v.paid); bal += ps; rows.push({ v, date: v.date, label: `Payment with ${v.no} (${v.mode || 'Cash'})`, dr: ps > 0 ? num(v.paid) : 0, cr: ps < 0 ? num(v.paid) : 0, bal }); }
     if (v.lines && num(v.tds)) { const ts = -t.party * num(v.tds); bal += ts; rows.push({ v, date: v.date, label: `TDS on ${v.no}`, dr: ts > 0 ? num(v.tds) : 0, cr: ts < 0 ? num(v.tds) : 0, bal }); }
@@ -916,7 +926,7 @@ function exportLedger(id) {
 /* ================= More ================= */
 function vMore() {
   hdr('More', { right: searchBtn() });
-  const m = [['reports', '📊', 'Reports'], ['exp', '💸', 'Expenses'], ['prod', '🏭', 'Production'], ['bill?f=quote', '📝', 'Quotations'], ['bill?f=pay', '💰', 'Payments'], ['bill?f=ret', '↩', 'Returns / CN / DN'], ...(taxMode() === 'regular' ? [['r/gstr1', '📤', 'GSTR-1'], ['r/gstr3b', '🧮', 'GSTR-3B']] : taxMode() === 'composition' ? [['r/cmp08', '🧾', 'CMP-08']] : []), ['r/pl', '📈', 'Profit & Loss'], ['settings', '⚙️', 'Settings & Backup']];
+  const m = [['reports', '📊', 'Reports'], ['exp', '💸', 'Expenses'], ['prod', '🏭', 'Production'], ['bill?f=quote', '📝', 'Quotations'], ['bill?f=pay', '💰', 'Payments'], ['bill?f=ret', '↩', 'Returns / CN / DN'], ...(taxMode() === 'regular' ? [['r/gstr1', '📤', 'GSTR-1'], ['r/gstr3b', '🧮', 'GSTR-3B']] : taxMode() === 'composition' ? [['r/cmp08', '🧾', 'CMP-08']] : []), ['r/pl', '📈', 'Profit & Loss'], ['accounts', '📚', 'Accounts'], ['r/tb', '⚖️', 'Trial Balance'], ['settings', '⚙️', 'Settings & Backup']];
   $('#main').innerHTML = `<div class="mgrid">${m.map(([h, i, l]) => `<button onclick="go('${h}')"><span class="i">${i}</span>${l}</button>`).join('')}</div>
   <div class="card"><h3>New Entry</h3><div class="btns"><button class="btn" onclick="go('new/sale')">+ Sales Invoice</button><button class="btn sec" onclick="go('new/purchase')">+ Purchase Bill</button><button class="btn ghost" onclick="go('new/quote')">+ Quotation</button></div></div>
   <div class="card"><div class="kv"><span>Business</span><b>${esc(co().name)}</b></div><div class="kv"><span>Tax mode</span><span id="moreTax">${TAXMODES.find(x => x[0] === taxMode())[1]}</span></div>${isGstCo() ? `<div class="kv"><span>GSTIN</span><span>${esc(co().gstin || '—')}</span></div>` : ''}<div class="kv"><span>Data</span><span>${S.items.length} items · ${S.parties.length} parties · ${S.vouchers.length} entries</span></div></div>`;
@@ -1235,6 +1245,7 @@ function vView(id) {
     const rows = [];
     if (v.type === 'payin' || v.type === 'payout') { const p = party(v.partyId); rows.push(['Party', esc(p ? p.name : '-')], ['Amount', `<b>${inr(v.amount)}</b>`], ['Mode', esc(v.mode)], ['Reference', esc(v.ref || '-')]); }
     if (v.type === 'exp') rows.push(['Category', esc(v.category)], ['Amount', `<b>${inr(v.amount)}</b>`], ['Mode', esc(v.mode)]);
+    if (v.entries) { v.entries.forEach(e => rows.push([esc(accName(e.a)), e.dr ? `Dr ${inr(e.dr)}` : `Cr ${inr(e.cr)}`])); if (v.narration) rows.push(['Narration', esc(v.narration)]); }
     if (v.type === 'prod') { const o = item(v.outItem); rows.push(['Produced', `<b>${esc(o ? o.name : '?')}</b> — ${qf(v.outQty)} ${esc(o ? o.unit : '')}`]); (v.lines || []).forEach(l => { const it = item(l.itemId); rows.push(['Used', `${esc(it ? it.name : '?')} — ${qf(l.qty)} ${esc(it ? it.unit : '')}`]); }); }
     rows.unshift(['Date', fd(v.date)], ['No', esc(v.no)]); if (v.note) rows.push(['Note', esc(v.note)]);
     h += `<div class="card">${rows.map(([k, x]) => `<div class="kv"><span>${k}</span><span style="text-align:right">${x}</span></div>`).join('')}</div>
@@ -1439,8 +1450,184 @@ function vProdForm(existing) {
   };
 }
 
+
+/* ================= Accounts: chart of accounts + double entry ================= */
+const GROUPS = [
+  ['capital', 'Capital Account', 'L'], ['loans', 'Loans (Liability)', 'L'], ['curliab', 'Current Liabilities', 'L'], ['creditors', 'Sundry Creditors', 'L'], ['duties', 'Duties & Taxes', 'L'],
+  ['fixed', 'Fixed Assets', 'A'], ['curassets', 'Current Assets', 'A'], ['debtors', 'Sundry Debtors', 'A'], ['bankg', 'Bank Accounts', 'A'], ['cashg', 'Cash-in-Hand', 'A'],
+  ['salesg', 'Sales Accounts', 'I'], ['salesretg', 'Sales Returns', 'I'], ['dirinc', 'Direct Income', 'I'], ['indinc', 'Indirect Income', 'I'],
+  ['purg', 'Purchase Accounts', 'E'], ['purretg', 'Purchase Returns', 'E'], ['direxp', 'Direct Expenses', 'E'], ['indexp', 'Indirect Expenses', 'E']];
+const DEF_LEDGERS = [['capital', 'Capital Account', 'capital'], ['cash', 'Cash', 'cashg'], ['bank', 'Bank Account', 'bankg'], ['walkin', 'Walk-in Customers', 'debtors'],
+  ['sales', 'Sales', 'salesg'], ['sret', 'Sales Returns', 'salesretg'], ['purchase', 'Purchase', 'purg'], ['pret', 'Purchase Returns', 'purretg'],
+  ['out_cgst', 'Output CGST', 'duties'], ['out_sgst', 'Output SGST', 'duties'], ['out_igst', 'Output IGST', 'duties'], ['out_cess', 'Output Cess', 'duties'],
+  ['in_cgst', 'Input CGST', 'duties'], ['in_sgst', 'Input SGST', 'duties'], ['in_igst', 'Input IGST', 'duties'], ['in_cess', 'Input Cess', 'duties'],
+  ['rcm_pay', 'GST Payable under Reverse Charge (RCM)', 'duties'], ['tds_recv', 'TDS Receivable', 'duties'], ['tds_pay', 'TDS Payable', 'duties'], ['tcs_pay', 'TCS Payable', 'duties'], ['tcs_recv', 'TCS Receivable', 'duties'],
+  ['roundoff', 'Round Off', 'indexp']];
+const ACC_T = ['rcpt', 'pmt', 'contra', 'jv'];
+const grpName = g => (GROUPS.find(x => x[0] === g) || [g, 'Other'])[1];
+const moneyAcc = mode => (mode || 'Cash') === 'Cash' ? 'cash' : 'bank';
+const accEnc = id => encodeURIComponent(id).replace(/'/g, '%27');
+function accList() {
+  const L = DEF_LEDGERS.map(([id, name, group]) => ({ id, name, group, sys: 1 }));
+  (S.settings.ledgers || []).forEach(l => L.push({ ...l }));
+  S.parties.forEach(p => L.push({ id: 'p:' + p.id, name: p.name, group: p.kind === 'supp' ? 'creditors' : 'debtors', party: 1 }));
+  const cats = new Set(EXP_CATS); S.vouchers.forEach(v => { if (v.type === 'exp') cats.add(v.category || 'Other'); (v.entries || []).forEach(e => { if (String(e.a).startsWith('exp:')) cats.add(e.a.slice(4)); }); });
+  cats.forEach(c => L.push({ id: 'exp:' + c, name: c + ' (Expense)', group: 'indexp', exp: 1 }));
+  return L;
+}
+function accById(id, L) {
+  const a = (L || accList()).find(x => x.id === id); if (a) return a;
+  if (String(id).startsWith('exp:')) return { id, name: id.slice(4) + ' (Expense)', group: 'indexp' };
+  if (String(id).startsWith('p:')) return { id, name: '(Deleted party)', group: 'debtors' };
+  return { id, name: String(id), group: 'curliab' };
+}
+const accName = id => accById(id).name;
+function ledGroup(id) { if (id === 'bank') return 'bankg'; if (id === 'cash') return 'cashg'; const l = (S.settings.ledgers || []).find(x => x.id === id); return l ? l.group : ''; }
+const isMoney = id => id === 'cash' || id === 'bank' || ['cashg', 'bankg'].includes(ledGroup(id));
+function accOpen(id) {
+  if (id === 'cash') return num(co().openCash);
+  if (String(id).startsWith('p:')) { const p = party(id.slice(2)); return p ? num(p.openBal) : 0; }
+  return num((S.settings.accOpen || {})[id]);
+}
+/* Pure: voucher -> balanced Dr/Cr lines [{a, dr, cr}] */
+function postings(v) {
+  const t = VT[v.type]; if (!t || v.type === 'quote' || v.type === 'prod') return [];
+  const main = new Map(), extra = [];
+  const add = (a, x) => { x = r2(x); if (a && x) main.set(a, r2((main.get(a) || 0) + x)); };
+  const pair = (dr, cr, x) => { x = r2(x); if (!x) return; if (x < 0) { [dr, cr] = [cr, dr]; x = -x; } extra.push([dr, x], [cr, -x]); };
+  const P = v.partyId ? 'p:' + v.partyId : 'walkin';
+  if (v.entries) v.entries.forEach(e => add(e.a, num(e.dr) - num(e.cr)));
+  else if (v.type === 'payin') pair(moneyAcc(v.mode), P, num(v.amount));
+  else if (v.type === 'payout') pair(P, moneyAcc(v.mode), num(v.amount));
+  else if (v.type === 'exp') pair('exp:' + (v.category || 'Other'), moneyAcc(v.mode), num(v.amount));
+  else if (t.lines) {
+    const d = ['sret', 'cn', 'pret'].includes(v.type) ? -1 : 1;
+    const c = num(v.cgst), s = num(v.sgst), i = num(v.igst), x = num(v.cess), tax = r2(c + s + i + x);
+    if (SALES_SIDE(v.type)) {
+      add(P, d * num(v.total));
+      add(v.type === 'sret' ? 'sret' : 'sales', -d * num(v.taxable));
+      if (!v.rcm) { add('out_cgst', -d * c); add('out_sgst', -d * s); add('out_igst', -d * i); add('out_cess', -d * x); }
+      add('tcs_pay', -d * num(v.tcs));
+      pair(moneyAcc(v.mode), P, d * num(v.paid)); pair('tds_recv', P, d * num(v.tds));
+    } else {
+      const L = v.type === 'pret' ? 'pret' : 'purchase', itc = v.itc !== false && vMode(v) === 'regular';
+      add(P, -d * num(v.total));
+      add(L, d * num(v.taxable));
+      if (itc) { add('in_cgst', d * c); add('in_sgst', d * s); add('in_igst', d * i); add('in_cess', d * x); } else add(L, d * tax);
+      if (v.rcm) add('rcm_pay', -d * tax);
+      add('tcs_recv', d * num(v.tcs));
+      pair(P, moneyAcc(v.mode), d * num(v.paid)); pair(P, 'tds_pay', d * num(v.tds));
+    }
+    let sum = 0; main.forEach(y => { sum += y; }); sum = r2(sum); if (sum) add('roundoff', -sum);
+  }
+  const out = []; const push = (a, y) => { if (Math.abs(y) > 0.004) out.push({ a, dr: y > 0 ? r2(y) : 0, cr: y < 0 ? r2(-y) : 0 }); };
+  main.forEach((y, a) => push(a, y)); extra.forEach(([a, y]) => push(a, y));
+  return out;
+}
+/* Balances (Dr positive) as on a date, including opening balances */
+function accTotals(to) {
+  const m = new Map(); const add = (a, x) => { if (x) m.set(a, r2((m.get(a) || 0) + x)); };
+  accList().forEach(l => add(l.id, accOpen(l.id)));
+  for (const v of S.vouchers) { if (to && v.date > to) continue; for (const e of postings(v)) add(e.a, r2(e.dr - e.cr)); }
+  return m;
+}
+function openDiff() { let s = 0; accList().forEach(l => { s += accOpen(l.id); }); return r2(-s); }
+const drcr = b => `${nfa(Math.abs(b))} ${b >= 0 ? 'Dr' : 'Cr'}`;
+function acvErr(v) {
+  const es = (v.entries || []).filter(e => e.a || num(e.dr) || num(e.cr));
+  if (es.length < 2) return 'Add at least two lines (one debit and one credit)';
+  for (const e of es) {
+    if (!e.a) return 'Select an account on every line';
+    const dr = num(e.dr), cr = num(e.cr);
+    if (dr < 0 || cr < 0) return 'Amounts cannot be negative';
+    if ((dr > 0) === (cr > 0)) return `Enter either a debit or a credit on each line (${accName(e.a)})`;
+  }
+  const D = r2(es.reduce((s, e) => s + num(e.dr), 0)), C = r2(es.reduce((s, e) => s + num(e.cr), 0));
+  if (!(D > 0) || !es.some(e => num(e.cr) > 0)) return 'Need at least one debit and one credit line';
+  if (D !== C) return `Debit (${inr(D)}) and credit (${inr(C)}) must be equal — difference ${inr(Math.abs(D - C))}`;
+  if (v.type === 'rcpt' && !es.some(e => num(e.dr) > 0 && isMoney(e.a))) return 'A receipt must debit Cash or a Bank account';
+  if (v.type === 'pmt' && !es.some(e => num(e.cr) > 0 && isMoney(e.a))) return 'A payment must credit Cash or a Bank account';
+  if (v.type === 'contra' && !es.every(e => isMoney(e.a))) return 'Contra entries can only use Cash and Bank accounts';
+  return '';
+}
+function accOpts(sel) {
+  const L = accList();
+  return '<option value="">Select account</option>' + GROUPS.map(([g, gn]) => { const ls = L.filter(l => l.group === g); return ls.length ? `<optgroup label="${esc(gn)}">${ls.map(l => `<option value="${esc(l.id)}" ${l.id === sel ? 'selected' : ''}>${esc(l.name)}</option>`).join('')}</optgroup>` : ''; }).join('');
+}
+
+/* Accounts screen */
+function vAccounts() {
+  hdr('Accounts', { back: true });
+  const T = accTotals(), L = accList(), od = openDiff();
+  $('#main').innerHTML = `<div class="btns" style="margin-bottom:10px"><button class="btn" id="accAdd" onclick="addLedger()">+ Add Ledger</button><button class="btn sec" onclick="go('r/tb')">Trial Balance</button></div>
+  <div class="btns" style="margin-bottom:12px"><button class="btn ghost sm" onclick="go('acv/rcpt')">+ Receipt</button><button class="btn ghost sm" onclick="go('acv/pmt')">+ Payment</button><button class="btn ghost sm" onclick="go('acv/contra')">+ Contra</button><button class="btn ghost sm" onclick="go('acv/jv')">+ Journal</button></div>
+  ${Math.abs(od) > 0.004 ? `<div class="warnbox" style="margin-bottom:10px">Opening balances differ by ${inr(Math.abs(od))} (${od > 0 ? 'Dr' : 'Cr'}). Add your capital or other opening balances to clear it.</div>` : ''}
+  <div id="accList">${GROUPS.map(([g, gn]) => { const ls = L.filter(l => l.group === g); const tot = r2(ls.reduce((s, l) => s + (T.get(l.id) || 0), 0));
+    return `<div class="sect" style="display:flex;justify-content:space-between"><span>${esc(gn)}</span><span data-grp="${g}">${drcr(tot)}</span></div><div class="list">${ls.length ? ls.map(l => { const b = T.get(l.id) || 0; return `<div class="row" data-acc="${esc(l.id)}" onclick="go('r/ledger?acc=${esc(accEnc(l.id))}')"><div class="m"><div class="t">${esc(l.name)}</div>${l.sys ? '' : `<div class="s">${l.party ? 'Party' : l.exp ? 'Expense category' : 'Your ledger'}</div>`}</div><div class="rt a ${b < -0.004 ? 'rd' : ''}">${drcr(b)}</div></div>`; }).join('') : '<div class="row mu" style="font-size:13px">No ledgers</div>'}</div>`; }).join('')}</div>`;
+}
+function addLedger() {
+  if (clOn() && !can('masters')) return denyToast();
+  sheet('Add Ledger', `<div class="f"><label>Ledger name *</label><input id="al_name" placeholder="e.g. HDFC Current A/c, Office Furniture"></div>
+  <div class="f"><label>Under group *</label><select id="al_group">${GROUPS.map(([g, gn]) => `<option value="${g}">${esc(gn)}</option>`).join('')}</select></div>
+  <div class="f2"><div class="f"><label>Opening balance (₹)</label><input id="al_open" inputmode="decimal" placeholder="0"></div><div class="f"><label>Dr / Cr</label><select id="al_side"><option value="Dr">Dr</option><option value="Cr">Cr</option></select></div></div>`, `<button class="btn full" id="al_save">Save Ledger</button>`);
+  $('#al_group').onchange = () => { const g = GROUPS.find(x => x[0] === $('#al_group').value); $('#al_side').value = g && (g[2] === 'A' || g[2] === 'E') ? 'Dr' : 'Cr'; };
+  $('#al_group').value = 'bankg'; $('#al_group').onchange();
+  $('#al_save').onclick = async () => {
+    const name = $('#al_name').value.trim(), group = $('#al_group').value, amt = r2(num($('#al_open').value)), side = $('#al_side').value;
+    const r = await saveLedger(name, group, side === 'Cr' ? -amt : amt);
+    if (r !== true) return toast(r);
+    closeOv(); toast('Ledger saved ✓'); render();
+  };
+}
+async function saveLedger(name, group, open) {
+  if (clOn() && !can('masters')) return 'Not allowed for your role';
+  if (!name) return 'Enter the ledger name';
+  if (!GROUPS.some(g => g[0] === group)) return 'Select a group';
+  if (accList().some(l => l.name.toLowerCase() === name.toLowerCase())) return `${name} already exists`;
+  const id = 'l:' + uid();
+  S.settings.ledgers = [...(S.settings.ledgers || []), { id, name, group }];
+  S.settings.accOpen = { ...(S.settings.accOpen || {}) }; if (num(open)) S.settings.accOpen[id] = r2(num(open));
+  await saveSettings(); dirty(); return true;
+}
+
+/* Receipt / Payment / Contra / Journal form */
+function vAcvForm(type, existing) {
+  const t = VT[type]; if (!t || !t.acc) return go('bill');
+  const route = location.hash;
+  if (!F || F.route !== route) {
+    const L = (a, dr, cr) => ({ a, dr: dr || '', cr: cr || '' });
+    const def = { rcpt: [L('cash'), L('')], pmt: [L(''), L('cash')], contra: [L('bank'), L('cash')], jv: [L(''), L('')] }[type];
+    F = { route, isNew: !existing, v: existing ? clone(existing) : { id: uid(), type, no: nextNo(type), date: today(), entries: def, narration: '' } };
+  }
+  const v = F.v;
+  hdr((F.isNew ? 'New ' : 'Edit ') + t.hi, { back: true });
+  const hint = { rcpt: 'Money received: debit Cash / Bank, credit the account it came from.', pmt: 'Money paid: debit the account paid for, credit Cash / Bank.', contra: 'Cash deposited in or withdrawn from bank, or bank-to-bank transfer.', jv: 'Adjustment between any accounts. Debits must equal credits.' }[type];
+  $('#main').innerHTML = `<p class="mu" style="margin:0 4px 10px;font-size:13px">${hint}</p>
+  <div class="card"><div class="f2"><div class="f"><label>No</label><input id="acv_no" value="${esc(v.no)}"></div><div class="f"><label>Date</label><input type="date" id="acv_date" value="${v.date}"></div></div></div>
+  <div id="acv_lines">${v.entries.map((e, i) => `<div class="line" data-i="${i}"><div class="hd"><b>Line ${i + 1}</b><button class="x" data-rm="${i}" aria-label="Remove">×</button></div><select data-k="a">${accOpts(e.a)}</select><div class="f2" style="margin-top:8px"><div><div class="lb">Debit (₹)</div><input data-k="dr" inputmode="decimal" value="${e.dr || ''}"></div><div><div class="lb">Credit (₹)</div><input data-k="cr" inputmode="decimal" value="${e.cr || ''}"></div></div></div>`).join('')}</div>
+  <button class="btn sec full" id="acv_add" style="margin-bottom:12px">+ Add Line</button>
+  <div class="card" id="acv_tot"></div>
+  <div class="card"><div class="f" style="margin:0"><label>Narration</label><textarea id="acv_nar" placeholder="Being ...">${esc(v.narration || '')}</textarea></div></div>`;
+  savebar(`<button class="btn full" id="acv_save">Save ${esc(t.hi)}</button>`);
+  const tot = () => { const D = r2(v.entries.reduce((s, e) => s + num(e.dr), 0)), C = r2(v.entries.reduce((s, e) => s + num(e.cr), 0)); $('#acv_tot').innerHTML = `<div class="kv"><span>Total Debit</span><b>${inr(D)}</b></div><div class="kv"><span>Total Credit</span><b>${inr(C)}</b></div><div class="kv"><span>Difference</span><b class="${D === C ? 'gr' : 'rd'}" id="acv_diff">${inr(Math.abs(D - C))}</b></div>`; };
+  const rd = () => { v.no = $('#acv_no').value.trim(); v.date = $('#acv_date').value || today(); v.narration = $('#acv_nar').value.trim(); };
+  $$('#acv_lines .line').forEach(el => { const i = +el.dataset.i; $$('[data-k]', el).forEach(inp => { inp.oninput = inp.onchange = () => { v.entries[i][inp.dataset.k] = inp.value; tot(); }; }); $('[data-rm]', el).onclick = () => { rd(); v.entries.splice(i, 1); vAcvForm(type, existing); }; });
+  $('#acv_add').onclick = () => { rd(); const D = r2(v.entries.reduce((s, e) => s + num(e.dr), 0)), C = r2(v.entries.reduce((s, e) => s + num(e.cr), 0)); v.entries.push({ a: '', dr: C > D ? r2(C - D) : '', cr: D > C ? r2(D - C) : '' }); vAcvForm(type, existing); };
+  tot();
+  $('#acv_save').onclick = async () => {
+    rd();
+    const rec = { ...v, entries: v.entries.filter(e => e.a || num(e.dr) || num(e.cr)).map(e => ({ a: e.a, dr: r2(num(e.dr)), cr: r2(num(e.cr)) })) };
+    const err = acvErr(rec); if (err) return toast(err);
+    if (!rec.no) return toast('Enter the voucher number');
+    if (S.vouchers.some(x => x.id !== rec.id && x.type === rec.type && x.no === rec.no)) return toast(`${rec.no} already exists`);
+    rec.amount = r2(rec.entries.reduce((s, e) => s + e.dr, 0));
+    await saveRec('vouchers', rec); await bumpNo(type, rec.no); toast(`${t.hi} saved ✓`); F = null; replaceTo('v/' + rec.id);
+  };
+}
+
 /* ================= Reports ================= */
 const RANGE = { from: monthStart(), to: today(), p: 'month' };
+let LEDGER_ACC = 'cash';
 function fyStart(d = today()) { const y = +d.slice(0, 4), m = +d.slice(5, 7); return `${m >= 4 ? y : y - 1}-04-01`; }
 function monthEnd(s) { const d = new Date(+s.slice(0, 4), +s.slice(5, 7), 0); return iso(d); }
 function setPreset(p) {
@@ -1466,7 +1653,9 @@ const ALL_REPORTS = [
   ['stock', '📦', 'Stock Summary', 'Quantity and value', 'all'],
   ['outstanding', '👥', 'Party Outstanding', 'Receivables / payables', 'all'],
   ['pl', '📈', 'Profit & Loss', 'Profit / loss', 'all'],
-  ['daybook', '📒', 'Day Book', 'All entries day by day', 'all'],
+  ['daybook', '📒', 'Day Book', 'All entries day by day, with debit / credit', 'all'],
+  ['ledger', '📗', 'Ledger', 'Any account with running balance', 'all'],
+  ['tb', '⚖️', 'Trial Balance', 'Debit and credit totals of every account', 'all'],
   ['itemsales', '🏷', 'Item-wise Sales', 'Quantity sold per item', 'all'],
   ['expenses', '💸', 'Expense Report', 'Category-wise expenses', 'all'],
   ['roundoff', '⚖️', 'Round Off Ledger', 'Rounding on every bill', 'all']
@@ -1765,10 +1954,34 @@ function buildReport(name) {
   }
   if (name === 'daybook') {
     R.title = 'Day Book';
-    const flow = v => { const p = num(v.paid); switch (v.type) { case 'payin': return [num(v.amount), 0]; case 'payout': case 'exp': return [0, num(v.amount)]; case 'sale': case 'pret': case 'dn': return [p, 0]; case 'purchase': case 'sret': case 'cn': return [0, p]; default: return [0, 0]; } };
+    const flow = v => { const p = num(v.paid); if (v.entries) return v.type === 'contra' ? [0, 0] : [r2(v.entries.filter(e => isMoney(e.a)).reduce((s, e) => s + num(e.dr), 0)), r2(v.entries.filter(e => isMoney(e.a)).reduce((s, e) => s + num(e.cr), 0))]; switch (v.type) { case 'payin': return [num(v.amount), 0]; case 'payout': case 'exp': return [0, num(v.amount)]; case 'sale': case 'pret': case 'dn': return [p, 0]; case 'purchase': case 'sret': case 'cn': return [0, p]; default: return [0, 0]; } };
     const rows = vs.filter(v => v.type !== 'quote').map(v => { const [i, o] = flow(v); return [fd(v.date), VT[v.type].hi, v.no, vParty(v), v.type === 'prod' ? '' : vAmount(v), v.mode || '', i, o]; });
     R.sections.push({ cols: [C_('Date'), C_('Type'), C_('No'), C_('Party / Detail'), C_('Amount', 1), C_('Mode'), C_('Money In', 1), C_('Money Out', 1)], rows, total: ['Total', `${rows.length} entries`, '', '', '', '', sumCol(rows, 6), sumCol(rows, 7)] });
     R.cards = [['Money In', inr(sumCol(rows, 6))], ['Money Out', inr(sumCol(rows, 7))], ['Cash in Hand (today)', inr(compute().cash)]];
+    const L = accList(); const jr = []; vs.forEach(v => postings(v).forEach(e => jr.push([fd(v.date), VT[v.type].hi, v.no, accById(e.a, L).name, e.dr, e.cr])));
+    R.sections.push({ title: 'Debit / Credit entries', cols: [C_('Date'), C_('Type'), C_('No'), C_('Account'), C_('Debit', 1), C_('Credit', 1)], rows: jr, total: ['Total', '', '', '', sumCol(jr, 4), sumCol(jr, 5)] });
+  }
+  if (name === 'ledger') {
+    const L = accList(); if (!L.some(l => l.id === LEDGER_ACC)) LEDGER_ACC = 'cash';
+    const A = accById(LEDGER_ACC, L); R.title = 'Ledger';
+    R.top = `<div class="f" style="margin-bottom:8px"><label>Account</label><select id="ledAcc">${accOpts(LEDGER_ACC)}</select></div>`;
+    let bal = accOpen(A.id); const all = [...S.vouchers].sort((a, b) => a.date.localeCompare(b.date) || (a.createdAt || 0) - (b.createdAt || 0));
+    all.filter(v => v.date < RANGE.from).forEach(v => postings(v).forEach(e => { if (e.a === A.id) bal = r2(bal + e.dr - e.cr); }));
+    const open = bal, rows = [['', 'Opening Balance', '', '', 0, 0, drcr(open)]]; let dr = 0, cr = 0;
+    vs.forEach(v => { const ps = postings(v); const oth = [...new Set(ps.filter(e => e.a !== A.id).map(e => accById(e.a, L).name))].slice(0, 2).join(', ') + (v.narration ? ' — ' + v.narration : ''); ps.filter(e => e.a === A.id).forEach(e => { bal = r2(bal + e.dr - e.cr); dr += e.dr; cr += e.cr; rows.push([fd(v.date), VT[v.type].hi, v.no, oth, e.dr, e.cr, drcr(bal)]); }); });
+    R.sections.push({ title: `${A.name} · ${grpName(A.group)}`, cols: [C_('Date'), C_('Type'), C_('No'), C_('Particulars'), C_('Debit', 1), C_('Credit', 1), C_('Balance')], rows, total: ['Closing', '', '', '', r2(dr), r2(cr), drcr(bal)] });
+    R.cards = [['Opening', drcr(open)], ['Closing', drcr(bal)]];
+  }
+  if (name === 'tb') {
+    R.title = 'Trial Balance'; R.asOf = true;
+    const T = accTotals(RANGE.to), L = accList(); const od = openDiff();
+    const gi = g => GROUPS.findIndex(x => x[0] === g);
+    const rows = [...T.entries()].filter(([, b]) => Math.abs(b) > 0.004).map(([id, b]) => { const a = accById(id, L); return [a.name, grpName(a.group), b > 0 ? r2(b) : 0, b < 0 ? r2(-b) : 0, gi(a.group)]; }).sort((a, b) => a[4] - b[4] || a[0].localeCompare(b[0])).map(r => r.slice(0, 4));
+    if (Math.abs(od) > 0.004) rows.push(['Difference in Opening Balances', '—', od > 0 ? od : 0, od < 0 ? -od : 0]);
+    const D = sumCol(rows, 2), Cr = sumCol(rows, 3);
+    R.sections.push({ cols: [C_('Account'), C_('Group'), C_('Debit', 1), C_('Credit', 1)], rows, total: ['Total', '', D, Cr] });
+    R.cards = [['Total Debit', inr(D)], ['Total Credit', inr(Cr)]];
+    R.note = Math.abs(od) > 0.004 ? 'Opening balances do not match; the difference is shown as a separate line. Add capital / other opening balances in Accounts to clear it.' : 'Debit and credit totals match.';
   }
   if (name === 'itemsales') {
     R.title = 'Item-wise Sales';
@@ -1794,7 +2007,7 @@ function vReport(name) {
   const R = buildReport(name);
   hdr(R.title, { back: true, right: `<button class="hbtn" aria-label="Excel" onclick="exportReport('${name}')" style="font-size:12px;font-weight:700;width:auto;padding:0 10px;border-radius:10px">⬇ Excel</button>` });
   const pr = [['today', 'Today'], ['month', 'This Month'], ['lmonth', 'Last Month'], ['fy', 'This FY'], ['all', 'All']];
-  $('#main').innerHTML = `<div class="chips">${pr.map(([k, l]) => `<button class="chip ${RANGE.p === k ? 'on' : ''}" onclick="setPreset('${k}')">${l}</button>`).join('')}</div>
+  $('#main').innerHTML = `${R.top || ''}<div class="chips">${pr.map(([k, l]) => `<button class="chip ${RANGE.p === k ? 'on' : ''}" onclick="setPreset('${k}')">${l}</button>`).join('')}</div>
   ${R.month ? `<div class="f" style="margin-bottom:6px"><label>Return period (month)</label><input type="month" id="rm" value="${RANGE.from.slice(0, 7)}"></div>` : ''}
   <div class="f2" style="margin-bottom:6px">${R.asOf ? '<div class="f" style="margin:0"><label>&nbsp;</label><div class="mu" style="padding-top:12px;font-size:13px">As on date →</div></div>' : `<div class="f" style="margin:0"><label>From</label><input type="date" id="rf" value="${RANGE.from}"></div>`}<div class="f" style="margin:0"><label>${R.asOf ? 'As on' : 'To'}</label><input type="date" id="rt" value="${RANGE.to}"></div></div>
   <div style="height:8px"></div>
@@ -1807,6 +2020,7 @@ function vReport(name) {
   const f = $('#rf'), t = $('#rt'), mm = $('#rm');
   if (f) f.onchange = () => { RANGE.from = f.value || RANGE.from; RANGE.p = 'custom'; render(); };
   if (mm) mm.onchange = () => setMonth(mm.value);
+  const la = $('#ledAcc'); if (la) la.onchange = () => replaceTo('r/ledger?acc=' + accEnc(la.value));
   t.onchange = () => { RANGE.to = t.value || RANGE.to; RANGE.p = 'custom'; if (R.asOf && RANGE.from > RANGE.to) RANGE.from = RANGE.to; render(); };
 }
 const repFile = R => `${R.title.replace(/\W+/g, '_')}_${RANGE.from}_${RANGE.to}`;
@@ -1954,10 +2168,11 @@ function can(x) {
   }
 }
 function canV(type) { const r = ROLE(); if (r === 'owner' || r === 'manager') return true; if (r === 'billing') return type === 'sale' || type === 'quote'; return false; }
-function canSeeV(v) { return ROLE() !== 'billing' || !['purchase', 'pret', 'payout', 'exp'].includes(v.type); }
+function canSeeV(v) { return ROLE() !== 'billing' || !['purchase', 'pret', 'payout', 'exp', ...ACC_T].includes(v.type); }
 function routeAllowed(a, b) {
   switch (a) {
-    case 'new': case 'pay': return canV(b);
+    case 'new': case 'pay': case 'acv': return canV(b);
+    case 'accounts': return can('reports');
     case 'edit': { const v = vch(b); return !v || canV(v.type); }
     case 'v': { const v = vch(b); return !v || canSeeV(v); }
     case 'exp': return b === 'new' ? canV('exp') : can('exp');
@@ -1987,6 +2202,7 @@ function applyRole() {
     if (m && !oc.includes('BILLF')) { const [path] = m[1].split('?'); const [a, b] = path.split('/'); if (!routeAllowed(a, b)) hide = true; }
     if (/\bdel(V|Item|Party)\(/.test(oc) && !can('delete')) hide = true;
     if (/resetAll\(/.test(oc) && !can('reset')) hide = true;
+    if (/addLedger\(/.test(oc) && !can('masters')) hide = true;
     if (hide) el.style.display = 'none';
   });
   const fab = $('#fab.fab');
