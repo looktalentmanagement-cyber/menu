@@ -1,5 +1,5 @@
-/* ERP service worker - cache-first, fully offline */
-const CACHE = 'erp-v3';
+/* LedgerOne service worker - cache-first, fully offline */
+const CACHE = 'erp-v4';
 const ASSETS = ['./', './index.html', './manifest.json', './icon-192.png', './icon-512.png'];
 
 self.addEventListener('install', e => {

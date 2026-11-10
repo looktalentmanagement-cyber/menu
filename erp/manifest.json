@@ -1,7 +1,7 @@
 {
-  "name": "Business ERP - Hisaab Kitaab",
-  "short_name": "ERP",
-  "description": "Billing, GST, Stock, Party ledger - offline business ERP",
+  "name": "LedgerOne — Billing • GST • Accounts",
+  "short_name": "LedgerOne",
+  "description": "LedgerOne: Billing • GST • Accounts — GST invoices, returns, stock and party ledger. Works offline.",
   "start_url": "./index.html",
   "scope": "./",
   "display": "standalone",
