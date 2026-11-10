@@ -614,6 +614,7 @@ function route() {
       case 'reports': return vReports();
       case 'r': if (q.acc) LEDGER_ACC = q.acc; return vReport(b);
       case 'accounts': return vAccounts();
+      case 'brs': return vBrs();
       case 'acv': return vAcvForm(b, null);
       case 'settings': return vSettings();
       default: go('home');
@@ -876,7 +877,7 @@ function vPartyForm(id, q) {
 }
 function gstinHint(el) { const g = el.value.trim().toUpperCase(), m = $('#p_gstinMsg'); if (!m) return; if (g.length < 15) { m.textContent = g ? `${g.length}/15 characters` : ''; m.className = 'mu'; return; } const e = gstinErr(g); m.textContent = e || `✓ Valid GSTIN · ${stateName(g.slice(0, 2))}`; m.className = e ? 'rd' : 'gr'; m.style.fontSize = '12px'; }
 async function delParty(id) {
-  if (S.vouchers.some(v => v.partyId === id)) return ask('This party has entries, so it cannot be deleted.', { ok: 'OK', cancel: 'Close' });
+  const blk = accDelBlock('p:' + id); if (blk) return ask(esc(blk), { ok: 'OK', cancel: 'Close' });
   if (!(await ask('Delete this party?', { ok: 'Delete', danger: true }))) return;
   await delRec('parties', id); toast('Deleted'); replaceTo('party');
 }
@@ -926,7 +927,7 @@ function exportLedger(id) {
 /* ================= More ================= */
 function vMore() {
   hdr('More', { right: searchBtn() });
-  const m = [['reports', '📊', 'Reports'], ['exp', '💸', 'Expenses'], ['prod', '🏭', 'Production'], ['bill?f=quote', '📝', 'Quotations'], ['bill?f=pay', '💰', 'Payments'], ['bill?f=ret', '↩', 'Returns / CN / DN'], ...(taxMode() === 'regular' ? [['r/gstr1', '📤', 'GSTR-1'], ['r/gstr3b', '🧮', 'GSTR-3B']] : taxMode() === 'composition' ? [['r/cmp08', '🧾', 'CMP-08']] : []), ['r/pl', '📈', 'Profit & Loss'], ['accounts', '📚', 'Accounts'], ['r/tb', '⚖️', 'Trial Balance'], ['settings', '⚙️', 'Settings & Backup']];
+  const m = [['reports', '📊', 'Reports'], ['exp', '💸', 'Expenses'], ['prod', '🏭', 'Production'], ['bill?f=quote', '📝', 'Quotations'], ['bill?f=pay', '💰', 'Payments'], ['bill?f=ret', '↩', 'Returns / CN / DN'], ...(taxMode() === 'regular' ? [['r/gstr1', '📤', 'GSTR-1'], ['r/gstr3b', '🧮', 'GSTR-3B']] : taxMode() === 'composition' ? [['r/cmp08', '🧾', 'CMP-08']] : []), ['r/pl', '📈', 'Profit & Loss'], ['r/bs', '🏛', 'Balance Sheet'], ['accounts', '📚', 'Accounts'], ['r/tb', '⚖️', 'Trial Balance'], ['brs', '🏦', 'Bank Reconciliation'], ['settings', '⚙️', 'Settings & Backup']];
   $('#main').innerHTML = `<div class="mgrid">${m.map(([h, i, l]) => `<button onclick="go('${h}')"><span class="i">${i}</span>${l}</button>`).join('')}</div>
   <div class="card"><h3>New Entry</h3><div class="btns"><button class="btn" onclick="go('new/sale')">+ Sales Invoice</button><button class="btn sec" onclick="go('new/purchase')">+ Purchase Bill</button><button class="btn ghost" onclick="go('new/quote')">+ Quotation</button></div></div>
   <div class="card"><div class="kv"><span>Business</span><b>${esc(co().name)}</b></div><div class="kv"><span>Tax mode</span><span id="moreTax">${TAXMODES.find(x => x[0] === taxMode())[1]}</span></div>${isGstCo() ? `<div class="kv"><span>GSTIN</span><span>${esc(co().gstin || '—')}</span></div>` : ''}<div class="kv"><span>Data</span><span>${S.items.length} items · ${S.parties.length} parties · ${S.vouchers.length} entries</span></div></div>`;
@@ -1400,7 +1401,7 @@ function vExpList() {
 function vExpForm(existing) {
   const v = existing ? clone(existing) : { id: uid(), type: 'exp', no: nextNo('exp'), date: today(), category: '', amount: '', mode: 'Cash', note: '' };
   hdr(existing ? 'Edit Expense' : 'New Expense', { back: true });
-  const cats = [...new Set([...EXP_CATS, ...S.vouchers.filter(x => x.type === 'exp').map(x => x.category)])];
+  const cats = [...new Set([...EXP_CATS, ...(S.settings.expCats || []), ...S.vouchers.filter(x => x.type === 'exp').map(x => x.category)])];
   $('#main').innerHTML = `<div class="card">
   <div class="f"><label>Amount (₹) *</label><input id="ef_amount" inputmode="decimal" value="${v.amount}" style="font-size:22px;font-weight:700"></div>
   <div class="f"><label>Category *</label><input id="ef_cat" value="${esc(v.category)}" placeholder="Type or pick a category"></div>
@@ -1471,7 +1472,7 @@ function accList() {
   const L = DEF_LEDGERS.map(([id, name, group]) => ({ id, name, group, sys: 1 }));
   (S.settings.ledgers || []).forEach(l => L.push({ ...l }));
   S.parties.forEach(p => L.push({ id: 'p:' + p.id, name: p.name, group: p.kind === 'supp' ? 'creditors' : 'debtors', party: 1 }));
-  const cats = new Set(EXP_CATS); S.vouchers.forEach(v => { if (v.type === 'exp') cats.add(v.category || 'Other'); (v.entries || []).forEach(e => { if (String(e.a).startsWith('exp:')) cats.add(e.a.slice(4)); }); });
+  const cats = new Set([...EXP_CATS, ...(S.settings.expCats || [])]); S.vouchers.forEach(v => { if (v.type === 'exp') cats.add(v.category || 'Other'); (v.entries || []).forEach(e => { if (String(e.a).startsWith('exp:')) cats.add(e.a.slice(4)); }); });
   cats.forEach(c => L.push({ id: 'exp:' + c, name: c + ' (Expense)', group: 'indexp', exp: 1 }));
   return L;
 }
@@ -1533,6 +1534,146 @@ function accTotals(to) {
 }
 function openDiff() { let s = 0; accList().forEach(l => { s += accOpen(l.id); }); return r2(-s); }
 const drcr = b => `${nfa(Math.abs(b))} ${b >= 0 ? 'Dr' : 'Cr'}`;
+
+/* ================= Final accounts (computed from postings; nothing stored) ================= */
+// Closing stock value as on date d (qty x purchase rate, positive stock only). d = '' -> opening stock from items.
+function invValue(d) { return r2(S.items.filter(i => i.type !== 'service').reduce((a, i) => a + Math.max(0, d ? stockAsOf(i.id, d) : num(i.openStock)) * num(i.purchaseRate), 0)); }
+function periodMove(from, to) { const m = new Map(); for (const v of S.vouchers) { if (v.date < from || v.date > to) continue; for (const e of postings(v)) m.set(e.a, r2((m.get(e.a) || 0) + e.dr - e.cr)); } return m; }
+const grpOf = (id, L) => accById(id, L).group;
+const IE_G = ['salesg', 'salesretg', 'dirinc', 'indinc', 'purg', 'purretg', 'direxp', 'indexp'];
+// Trading + Profit & Loss for a period
+function plCalc(from, to) {
+  const M = periodMove(from, to), L = accList();
+  const list = gs => [...M.entries()].filter(([id, x]) => gs.includes(grpOf(id, L)) && Math.abs(x) > 0.004).map(([id, x]) => [accById(id, L).name, r2(x)]).sort((a, b) => a[0].localeCompare(b[0]));
+  const tot = gs => r2(list(gs).reduce((s, r) => s + r[1], 0));
+  const sales = -tot(['salesg']), sret = tot(['salesretg']), netSales = r2(sales - sret);
+  const dirInc = list(['dirinc']).map(([n, x]) => [n, -x]), dirIncT = -tot(['dirinc']);
+  const pur = tot(['purg']), pret = -tot(['purretg']), dirExp = list(['direxp']), dirExpT = tot(['direxp']);
+  const openStock = invValue(addDays(from, -1)), closeStock = invValue(to);
+  const cogs = r2(openStock + pur - pret + dirExpT - closeStock), gp = r2(netSales + dirIncT - cogs);
+  const indInc = list(['indinc']).map(([n, x]) => [n, -x]), indIncT = -tot(['indinc']), indExp = list(['indexp']), indExpT = tot(['indexp']);
+  const np = r2(gp + indIncT - indExpT);
+  return { sales, sret, netSales, dirInc, dirIncT, openStock, pur, pret, dirExp, dirExpT, closeStock, cogs, gp, indInc, indIncT, indExp, indExpT, np };
+}
+// Profit of all periods up to date d (incl. income / expense opening balances)
+function profitTo(d) { const T = accTotals(d), L = accList(); let ie = 0; T.forEach((b, id) => { if (IE_G.includes(grpOf(id, L))) ie += b; }); return r2(-ie + invValue(d) - invValue('')); }
+// Balance Sheet as on d; earlier years' profit is carried to capital (closing computed, not stored)
+function bsCalc(d) {
+  const T = accTotals(d), L = accList(), F = fyStart(d);
+  const B = { capital: 0, prior: r2(profitTo(addDays(F, -1))), cur: plCalc(F, d).np, loans: 0, od: 0, payables: 0, othLiab: 0, dutiesL: 0, fixed: 0, inv: invValue(d), recv: 0, cash: 0, bank: 0, taxA: 0, othA: 0 };
+  const add = (k, x) => { B[k] = r2(B[k] + x); };
+  T.forEach((b, id) => {
+    if (Math.abs(b) < 0.005) return; const g = grpOf(id, L);
+    if (IE_G.includes(g)) return;
+    if (g === 'capital') add('capital', -b); else if (g === 'loans') add('loans', -b);
+    else if (g === 'fixed') add('fixed', b); else if (g === 'curassets') add('othA', b); else if (g === 'curliab') add('othLiab', -b);
+    else if (g === 'debtors') b > 0 ? add('recv', b) : add('othLiab', -b);
+    else if (g === 'creditors') b < 0 ? add('payables', -b) : add('othA', b);
+    else if (g === 'duties') b < 0 ? add('dutiesL', -b) : add('taxA', b);
+    else if (g === 'cashg' || g === 'bankg') b >= 0 ? add(g === 'cashg' ? 'cash' : 'bank', b) : add('od', -b);
+    else add('othLiab', -b);
+  });
+  B.funds = r2(B.capital + B.prior + B.cur);
+  B.liab = r2(B.funds + B.loans + B.od + B.payables + B.othLiab + B.dutiesL);
+  B.assets = r2(B.fixed + B.inv + B.recv + B.cash + B.bank + B.taxA + B.othA);
+  B.diff = r2(B.assets - B.liab); B.total = r2(Math.max(B.assets, B.liab));
+  return B;
+}
+// Cash flow (indirect method, simplified)
+function cfCalc(from, to) {
+  const T0 = accTotals(addDays(from, -1)), T1 = accTotals(to), L = accList();
+  const gs = (T, g) => { let s = 0; T.forEach((b, id) => { if (g.includes(grpOf(id, L))) s += b; }); return r2(s); };
+  const dl = g => r2(gs(T1, g) - gs(T0, g));
+  const C = { np: plCalc(from, to).np, inv: -r2(invValue(to) - invValue(addDays(from, -1))), recv: -dl(['debtors']), pay: -dl(['creditors']), duties: -dl(['duties']), oth: -dl(['curassets', 'curliab']) };
+  C.op = r2(C.np + C.inv + C.recv + C.pay + C.duties + C.oth);
+  C.fixed = -dl(['fixed']); C.inv_ = C.fixed;
+  C.capital = -dl(['capital']); C.loans = -dl(['loans']); C.fin = r2(C.capital + C.loans);
+  C.net = r2(C.op + C.fixed + C.fin);
+  C.open = gs(T0, ['cashg', 'bankg']); C.close = gs(T1, ['cashg', 'bankg']); C.actual = r2(C.close - C.open);
+  return C;
+}
+// Bank reconciliation for a bank ledger as on date d
+function brsCalc(acc, d) {
+  const rows = []; let books = accOpen(acc);
+  const all = [...S.vouchers].sort((a, b) => a.date.localeCompare(b.date) || (a.createdAt || 0) - (b.createdAt || 0));
+  for (const v of all) { if (v.date > d) continue; for (const e of postings(v)) if (e.a === acc) { books = r2(books + e.dr - e.cr); rows.push({ v, dr: e.dr, cr: e.cr, clr: (v.bankClr || {})[acc] || '' }); } }
+  const un = r => !r.clr || r.clr > d;
+  const depU = r2(rows.filter(un).reduce((s, r) => s + r.dr, 0)), issU = r2(rows.filter(un).reduce((s, r) => s + r.cr, 0));
+  return { rows, books, depU, issU, bank: r2(books - depU + issU) };
+}
+async function setBankClr(id, acc, date) {
+  const v = vch(id); if (!v) return 'Entry not found';
+  if (date && date < v.date) return 'Cleared date cannot be before the entry date';
+  const rec = clone(v); rec.bankClr = { ...(rec.bankClr || {}) }; if (date) rec.bankClr[acc] = date; else delete rec.bankClr[acc];
+  await saveRec('vouchers', rec); return true;
+}
+// Delete protection: '' if the account may be deleted, otherwise a friendly reason
+function accDelBlock(id) {
+  id = String(id); const a = accById(id);
+  if (DEF_LEDGERS.some(x => x[0] === id)) return `${a.name} is a built-in account and cannot be deleted.`;
+  const isExp = id.startsWith('exp:'), cat = id.slice(4), pid = id.startsWith('p:') ? id.slice(2) : '';
+  if (isExp && EXP_CATS.includes(cat)) return `${cat} is a built-in expense category and cannot be deleted.`;
+  const n = S.vouchers.filter(v => (pid && v.partyId === pid) || (isExp && v.type === 'exp' && (v.category || 'Other') === cat) || (v.entries || []).some(e => e.a === id) || postings(v).some(e => e.a === id)).length;
+  return n ? `${isExp ? cat + ' (expense category)' : a.name} is used in ${n} ${n === 1 ? 'entry' : 'entries'}, so it cannot be deleted. Delete or change those entries first.` : '';
+}
+async function delAccount(id) {
+  if (clOn() && !can('masters')) return denyToast();
+  const blk = accDelBlock(id); if (blk) { await ask(esc(blk), { ok: 'OK', cancel: 'Close' }); return false; }
+  if (String(id).startsWith('p:')) { await delParty(id.slice(2)); return true; }
+  if (!(await ask(`Delete ${esc(accName(id))}?`, { ok: 'Delete', danger: true }))) return false;
+  if (String(id).startsWith('exp:')) S.settings.expCats = (S.settings.expCats || []).filter(c => c !== id.slice(4));
+  else { S.settings.ledgers = (S.settings.ledgers || []).filter(l => l.id !== id); const o = { ...(S.settings.accOpen || {}) }; delete o[id]; S.settings.accOpen = o; }
+  await saveSettings(); dirty(); toast('Deleted'); render(); return true;
+}
+function addExpCat() {
+  if (clOn() && !can('masters')) return denyToast();
+  sheet('Add Expense Category', `<div class="f"><label>Category name *</label><input id="ec_name" placeholder="e.g. Advertising"></div>`, `<button class="btn full" id="ec_save">Save Category</button>`);
+  $('#ec_save').onclick = async () => { const n = $('#ec_name').value.trim(); if (!n) return toast('Enter the category name');
+    if (accList().some(l => l.id === 'exp:' + n || l.name.toLowerCase() === n.toLowerCase())) return toast(`${n} already exists`);
+    S.settings.expCats = [...(S.settings.expCats || []), n]; await saveSettings(); dirty(); closeOv(); toast('Category saved ✓'); render(); };
+}
+// Opening balances (balance-sheet accounts). map: id -> signed amount (Dr +, Cr -)
+const OPEN_G = ['capital', 'loans', 'fixed', 'curassets', 'curliab', 'bankg', 'cashg', 'duties'];
+function openAccs() { return accList().filter(l => !l.party && !l.exp && OPEN_G.includes(l.group)).sort((a, b) => OPEN_G.indexOf(a.group) - OPEN_G.indexOf(b.group)); }
+function openGap() { let s = invValue(''); accList().forEach(l => { s += accOpen(l.id); }); return r2(s); }
+async function saveOpenings(map) {
+  if (clOn() && !can('masters')) return 'Not allowed for your role';
+  const o = { ...(S.settings.accOpen || {}) };
+  for (const [id, x] of Object.entries(map)) { const y = r2(num(x)); if (id === 'cash') { S.settings.company = { ...co(), openCash: y }; continue; } if (y) o[id] = y; else delete o[id]; }
+  S.settings.accOpen = o; await saveSettings(); dirty(); return true;
+}
+function editOpenings() {
+  if (clOn() && !can('masters')) return denyToast();
+  const A = openAccs();
+  sheet('Opening Balances', `<p class="mu" style="font-size:13px;margin:0 0 8px">Balances on the day you started using the app. Customers / suppliers opening balances are set on each party; opening stock on each item.</p>
+  ${A.map(l => { const b = accOpen(l.id); return `<div class="f2" data-ob="${esc(l.id)}"><div class="f"><label>${esc(l.name)} <span class="mu">· ${esc(grpName(l.group))}</span></label><input inputmode="decimal" data-k="amt" value="${b ? Math.abs(b) : ''}" placeholder="0"></div><div class="f"><label>Dr / Cr</label><select data-k="side"><option value="Dr" ${b > 0 || (!b && ['fixed', 'curassets', 'bankg', 'cashg'].includes(l.group)) ? 'selected' : ''}>Dr</option><option value="Cr" ${b < 0 || (!b && !['fixed', 'curassets', 'bankg', 'cashg'].includes(l.group)) ? 'selected' : ''}>Cr</option></select></div></div>`; }).join('')}
+  <div class="warnbox" id="ob_diff"></div>`, `<button class="btn sec full" id="ob_fix" style="margin-bottom:8px">Put difference in Capital</button><button class="btn full" id="ob_save">Save Opening Balances</button>`);
+  const read = () => { const m = {}; $$('[data-ob]').forEach(el => { const x = r2(num($('[data-k=amt]', el).value)); m[el.dataset.ob] = $('[data-k=side]', el).value === 'Cr' ? -x : x; }); return m; };
+  const gap = () => { const m = read(); let s = invValue(''); accList().forEach(l => { s += l.id in m ? m[l.id] : accOpen(l.id); }); return r2(s); };
+  const show = () => { const g = gap(); $('#ob_diff').innerHTML = Math.abs(g) < 0.005 ? '✓ Opening balances match' : `Difference: ${inr(Math.abs(g))} ${g > 0 ? 'Dr' : 'Cr'} (opening stock ${inr(invValue(''))} included). Usually this is your capital.`; };
+  $$('[data-ob] input, [data-ob] select').forEach(el => { el.oninput = el.onchange = show; }); show();
+  $('#ob_fix').onclick = () => { const g = gap(), el = $('[data-ob="capital"]'); if (!el) return; const cur = read().capital || 0, nv = r2(cur - g); $('[data-k=amt]', el).value = Math.abs(nv) || ''; $('[data-k=side]', el).value = nv > 0 ? 'Dr' : 'Cr'; show(); };
+  $('#ob_save').onclick = async () => { const r = await saveOpenings(read()); if (r !== true) return toast(r); closeOv(); toast('Opening balances saved ✓'); render(); };
+}
+/* Bank reconciliation screen */
+let BRS = { acc: 'bank', to: '' };
+function vBrs() {
+  hdr('Bank Reconciliation', { back: true });
+  const banks = accList().filter(l => l.group === 'bankg'); if (!banks.some(b => b.id === BRS.acc)) BRS.acc = 'bank';
+  const d = BRS.to || today(), R = brsCalc(BRS.acc, d), ro = clOn() && !canV('rcpt');
+  $('#main').innerHTML = `<div class="card"><div class="f"><label>Bank account</label><select id="brs_acc">${banks.map(b => `<option value="${esc(b.id)}" ${b.id === BRS.acc ? 'selected' : ''}>${esc(b.name)}</option>`).join('')}</select></div>
+  <div class="f" style="margin:0"><label>As on</label><input type="date" id="brs_to" value="${d}"></div></div>
+  <div class="card" id="brs_sum"><div class="kv"><span>Balance as per books</span><b id="brs_books">${drcr(R.books)}</b></div>
+  <div class="kv"><span>Less: Deposits not yet cleared by bank</span><b id="brs_dep">${inr(R.depU)}</b></div>
+  <div class="kv"><span>Add: Cheques issued but not yet presented</span><b id="brs_iss">${inr(R.issU)}</b></div>
+  <div class="kv"><span>Balance as per bank statement</span><b id="brs_bank">${drcr(R.bank)}</b></div></div>
+  <p class="mu" style="font-size:12.5px;margin:0 4px 8px">Enter the date each entry appears in your bank statement. Entries without a date are treated as not yet cleared.</p>
+  <div class="list" id="brs_list">${R.rows.length ? R.rows.slice().reverse().map(r => `<div class="row" data-brs="${esc(r.v.id)}"><div class="m"><div class="t">${esc(vParty(r.v) || VT[r.v.type].hi)}</div><div class="s">${fd(r.v.date)} · ${esc(VT[r.v.type].hi)} ${esc(r.v.no || '')} · ${r.dr ? 'Deposit' : 'Withdrawal'}</div>
+  <input type="date" data-clr value="${r.clr}" ${ro ? 'disabled' : ''} aria-label="Cleared date" style="margin-top:6px;max-width:170px"></div><div class="rt a ${r.cr ? 'rd' : 'gr'}">${r.dr ? '+' + nfa(r.dr) : '-' + nfa(r.cr)}</div></div>`).join('') : '<div class="row mu" style="font-size:13px">No bank entries up to this date</div>'}</div>`;
+  $('#brs_acc').onchange = () => { BRS.acc = $('#brs_acc').value; render(); };
+  $('#brs_to').onchange = () => { BRS.to = $('#brs_to').value; render(); };
+  $$('#brs_list [data-brs]').forEach(el => { const inp = $('[data-clr]', el); inp.onchange = async () => { try { const r = await setBankClr(el.dataset.brs, BRS.acc, inp.value); if (r !== true) { toast(r); inp.value = ((vch(el.dataset.brs) || {}).bankClr || {})[BRS.acc] || ''; return; } toast('Cleared date saved ✓'); vBrs(); } catch (e) { } }; });
+}
 function acvErr(v) {
   const es = (v.entries || []).filter(e => e.a || num(e.dr) || num(e.cr));
   if (es.length < 2) return 'Add at least two lines (one debit and one credit)';
@@ -1560,10 +1701,11 @@ function vAccounts() {
   hdr('Accounts', { back: true });
   const T = accTotals(), L = accList(), od = openDiff();
   $('#main').innerHTML = `<div class="btns" style="margin-bottom:10px"><button class="btn" id="accAdd" onclick="addLedger()">+ Add Ledger</button><button class="btn sec" onclick="go('r/tb')">Trial Balance</button></div>
+  <div class="btns" style="margin-bottom:10px"><button class="btn ghost sm" id="accOpenBtn" onclick="editOpenings()">Opening Balances</button><button class="btn ghost sm" onclick="addExpCat()">+ Expense Category</button><button class="btn ghost sm" onclick="go('brs')">Bank Reconciliation</button><button class="btn ghost sm" onclick="go('r/pl')">Profit &amp; Loss</button><button class="btn ghost sm" onclick="go('r/bs')">Balance Sheet</button><button class="btn ghost sm" onclick="go('r/cf')">Cash Flow</button></div>
   <div class="btns" style="margin-bottom:12px"><button class="btn ghost sm" onclick="go('acv/rcpt')">+ Receipt</button><button class="btn ghost sm" onclick="go('acv/pmt')">+ Payment</button><button class="btn ghost sm" onclick="go('acv/contra')">+ Contra</button><button class="btn ghost sm" onclick="go('acv/jv')">+ Journal</button></div>
   ${Math.abs(od) > 0.004 ? `<div class="warnbox" style="margin-bottom:10px">Opening balances differ by ${inr(Math.abs(od))} (${od > 0 ? 'Dr' : 'Cr'}). Add your capital or other opening balances to clear it.</div>` : ''}
   <div id="accList">${GROUPS.map(([g, gn]) => { const ls = L.filter(l => l.group === g); const tot = r2(ls.reduce((s, l) => s + (T.get(l.id) || 0), 0));
-    return `<div class="sect" style="display:flex;justify-content:space-between"><span>${esc(gn)}</span><span data-grp="${g}">${drcr(tot)}</span></div><div class="list">${ls.length ? ls.map(l => { const b = T.get(l.id) || 0; return `<div class="row" data-acc="${esc(l.id)}" onclick="go('r/ledger?acc=${esc(accEnc(l.id))}')"><div class="m"><div class="t">${esc(l.name)}</div>${l.sys ? '' : `<div class="s">${l.party ? 'Party' : l.exp ? 'Expense category' : 'Your ledger'}</div>`}</div><div class="rt a ${b < -0.004 ? 'rd' : ''}">${drcr(b)}</div></div>`; }).join('') : '<div class="row mu" style="font-size:13px">No ledgers</div>'}</div>`; }).join('')}</div>`;
+    return `<div class="sect" style="display:flex;justify-content:space-between"><span>${esc(gn)}</span><span data-grp="${g}">${drcr(tot)}</span></div><div class="list">${ls.length ? ls.map(l => { const b = T.get(l.id) || 0; return `<div class="row" data-acc="${esc(l.id)}" onclick="go('r/ledger?acc=${esc(accEnc(l.id))}')"><div class="m"><div class="t">${esc(l.name)}</div>${l.sys ? '' : `<div class="s">${l.party ? 'Party' : l.exp ? 'Expense category' : 'Your ledger'}</div>`}</div><div class="rt a ${b < -0.004 ? 'rd' : ''}">${drcr(b)}</div>${l.sys || (l.exp && EXP_CATS.includes(l.id.slice(4))) ? '' : `<button class="x" data-del="${esc(l.id)}" aria-label="Delete" onclick="event.stopPropagation();delAccount(this.dataset.del)" style="margin-left:6px">🗑</button>`}</div>`; }).join('') : '<div class="row mu" style="font-size:13px">No ledgers</div>'}</div>`; }).join('')}</div>`;
 }
 function addLedger() {
   if (clOn() && !can('masters')) return denyToast();
@@ -1626,12 +1768,16 @@ function vAcvForm(type, existing) {
 }
 
 /* ================= Reports ================= */
-const RANGE = { from: monthStart(), to: today(), p: 'month' };
+const RANGE = { from: monthStart(), to: today(), p: 'month', touched: false };
+let BS_MODE = 'v';
+const FINALS = ['pl', 'bs', 'cf'];
+function fyList() { const c = +fyStart().slice(0, 4); let m = c; S.vouchers.forEach(v => { const y = +fyStart(v.date).slice(0, 4); if (y < m) m = y; }); const o = []; for (let y = c; y >= Math.max(m, c - 10); y--) o.push(y); return o; }
+function setFY(y) { y = +y; RANGE.from = `${y}-04-01`; const e = `${y + 1}-03-31`; RANGE.to = e < today() ? e : today(); RANGE.p = 'fy' + y; RANGE.touched = true; render(); }
 let LEDGER_ACC = 'cash';
 function fyStart(d = today()) { const y = +d.slice(0, 4), m = +d.slice(5, 7); return `${m >= 4 ? y : y - 1}-04-01`; }
 function monthEnd(s) { const d = new Date(+s.slice(0, 4), +s.slice(5, 7), 0); return iso(d); }
 function setPreset(p) {
-  const t = today(); RANGE.p = p;
+  const t = today(); RANGE.p = p; RANGE.touched = true;
   if (p === 'today') { RANGE.from = RANGE.to = t; }
   if (p === 'month') { RANGE.from = monthStart(t); RANGE.to = t; }
   if (p === 'lmonth') { const d = new Date(t + 'T00:00:00'); d.setDate(0); RANGE.to = iso(d); RANGE.from = monthStart(RANGE.to); }
@@ -1639,7 +1785,7 @@ function setPreset(p) {
   if (p === 'all') { RANGE.from = '2000-01-01'; RANGE.to = t; }
   render();
 }
-function setMonth(m) { if (!m) return; RANGE.from = m + '-01'; RANGE.to = monthEnd(RANGE.from); RANGE.p = 'custom'; render(); }
+function setMonth(m) { if (!m) return; RANGE.touched = true; RANGE.from = m + '-01'; RANGE.to = monthEnd(RANGE.from); RANGE.p = 'custom'; render(); }
 const ALL_REPORTS = [
   ['sales', '🧾', 'Sales Register', 'All sales invoices', 'all'],
   ['purchase', '🛒', 'Purchase Register', 'All purchase bills', 'all'],
@@ -1652,7 +1798,9 @@ const ALL_REPORTS = [
   ['ewb', '🚚', 'E-way Bill Register', 'Invoices above ₹50,000', 'gst'],
   ['stock', '📦', 'Stock Summary', 'Quantity and value', 'all'],
   ['outstanding', '👥', 'Party Outstanding', 'Receivables / payables', 'all'],
-  ['pl', '📈', 'Profit & Loss', 'Profit / loss', 'all'],
+  ['pl', '📈', 'Profit & Loss', 'Trading and profit & loss account', 'all'],
+  ['bs', '🏛', 'Balance Sheet', 'Assets and liabilities (Schedule III or simple)', 'all'],
+  ['cf', '💧', 'Cash Flow', 'Where your cash came from and went', 'all'],
   ['daybook', '📒', 'Day Book', 'All entries day by day, with debit / credit', 'all'],
   ['ledger', '📗', 'Ledger', 'Any account with running balance', 'all'],
   ['tb', '⚖️', 'Trial Balance', 'Debit and credit totals of every account', 'all'],
@@ -1935,22 +2083,53 @@ function buildReport(name) {
     R.sections.push({ cols: [C_('Party'), C_('Phone'), C_('Type'), C_('Receivable', 1), C_('Payable', 1)], rows, total: ['Total', '', '', sumCol(rows, 3), sumCol(rows, 4)] });
     R.cards = [['Receivable', inr(sumCol(rows, 3))], ['Payable', inr(sumCol(rows, 4))]];
   }
+  if (FINALS.includes(name)) {
+    const fys = fyList(), cy = +RANGE.from.slice(0, 4) - (+RANGE.from.slice(5, 7) < 4 ? 1 : 0);
+    R.top = `<div class="f" style="margin-bottom:8px"><label>Financial year (1 Apr – 31 Mar)</label><select id="fySel">${fys.map(y => `<option value="${y}" ${y === cy ? 'selected' : ''}>FY ${y}-${String((y + 1) % 100).padStart(2, '0')}</option>`).join('')}</select></div>`;
+  }
   if (name === 'pl') {
     R.title = 'Profit & Loss';
-    const s = t => r2(vs.filter(v => v.type === t).reduce((a, v) => a + num(v.taxable), 0));
-    const sales = r2(s('sale') + s('dn')), sret = r2(s('sret') + s('cn')), pur = s('purchase'), pret = s('pret');
-    const dayBefore = addDays(RANGE.from, -1);
-    const sv = d => r2(S.items.filter(i => i.type !== 'service').reduce((a, i) => a + Math.max(0, stockAsOf(i.id, d)) * num(i.purchaseRate), 0));
-    const opening = sv(dayBefore), closing = sv(RANGE.to);
-    const netSales = r2(sales - sret), cogs = r2(opening + pur - pret - closing), gross = r2(netSales - cogs);
-    const ex = new Map(); vs.filter(v => v.type === 'exp').forEach(v => ex.set(v.category, (ex.get(v.category) || 0) + num(v.amount)));
-    const sg = v => ({ sale: 1, dn: 1, pret: 1, purchase: -1, sret: -1, cn: -1 }[v.type] || 0);
-    const ro = r2(vs.filter(v => v.lines && v.type !== 'quote').reduce((a, v) => a + sg(v) * num(v.roundOff), 0));
-    const exTot = r2([...ex.values()].reduce((a, b) => a + b, 0)); const net = r2(gross - exTot + ro);
-    const rows = [['Sales incl. debit notes (taxable value)', sales], ['Less: Returns & credit notes', -sret], ['Net Sales', netSales], ['Opening Stock', opening], ['Add: Purchases (taxable)', pur], ['Less: Purchase Returns', -pret], ['Less: Closing Stock', -closing], ['Cost of Goods Sold', cogs], [gross >= 0 ? 'Gross Profit' : 'Gross Loss', gross], ...[...ex.entries()].map(([k, x]) => ['Expense: ' + k, -r2(x)]), ['Total Expenses', -exTot], ['Round Off (net)', ro]];
-    R.sections.push({ cols: [C_('Particulars'), C_('Amount (₹)', 1)], rows, total: [net >= 0 ? 'NET PROFIT' : 'NET LOSS', net] });
-    R.cards = [['Net Sales', inr(netSales)], ['Gross Profit', inr(gross)], ['Expenses', inr(exTot)], [net >= 0 ? 'Net Profit' : 'Net Loss', inr(net)]];
-    R.note = 'Simple P&L: GST kept separate. Stock valued at purchase rate.';
+    const P = plCalc(RANGE.from, RANGE.to);
+    const tr = [['Sales (after credit / debit notes)', P.sales], ['Less: Sales returns', -P.sret], ['Net Sales', P.netSales], ...P.dirInc.map(([n, x]) => ['Add: ' + n + ' (direct income)', x]),
+      ['Opening Stock', P.openStock], ['Add: Purchases', P.pur], ['Less: Purchase returns', -P.pret], ...P.dirExp.map(([n, x]) => ['Add: ' + n + ' (direct expense)', x]), ['Less: Closing Stock', -P.closeStock], ['Cost of Goods Sold', P.cogs]];
+    R.sections.push({ title: 'Trading Account', cols: [C_('Particulars'), C_('Amount (₹)', 1)], rows: tr, total: [P.gp >= 0 ? 'GROSS PROFIT' : 'GROSS LOSS', P.gp] });
+    const pr = [[P.gp >= 0 ? 'Gross Profit b/f' : 'Gross Loss b/f', P.gp], ...P.indInc.map(([n, x]) => ['Add: ' + n, x]), ['Total indirect income', P.indIncT], ...P.indExp.map(([n, x]) => ['Less: ' + n, -x]), ['Total indirect expenses', -P.indExpT]];
+    R.sections.push({ title: 'Profit & Loss Account', cols: [C_('Particulars'), C_('Amount (₹)', 1)], rows: pr, total: [P.np >= 0 ? 'NET PROFIT' : 'NET LOSS', P.np] });
+    R.cards = [['Net Sales', inr(P.netSales)], [P.gp >= 0 ? 'Gross Profit' : 'Gross Loss', inr(P.gp)], ['Indirect Expenses', inr(P.indExpT)], [P.np >= 0 ? 'Net Profit' : 'Net Loss', inr(P.np)]];
+    R.pl = P;
+    R.note = 'All amounts exclude GST (input / output tax is shown in the Balance Sheet). Stock valued at purchase rate. Round off is included in indirect expenses.';
+  }
+  if (name === 'bs') {
+    R.title = 'Balance Sheet'; R.asOf = true;
+    const B = bsCalc(RANGE.to); R.bs = B;
+    R.top = (R.top || '') + `<div class="chips"><button class="chip ${BS_MODE === 'v' ? 'on' : ''}" data-bsm="v">Schedule III (vertical)</button><button class="chip ${BS_MODE === 'h' ? 'on' : ''}" data-bsm="h">Simple (two sides)</button></div>`;
+    const dL = B.diff > 0 ? B.diff : 0, dA = B.diff < 0 ? -B.diff : 0;
+    if (BS_MODE === 'h') {
+      const L = [['Capital Account', B.capital], ['Add: Profit of earlier years', B.prior], [B.cur >= 0 ? 'Add: Net profit for the year' : 'Less: Net loss for the year', B.cur], ['Loans', B.loans], ['Bank overdraft', B.od], ['Sundry creditors', B.payables], ['Duties & taxes payable', B.dutiesL], ['Other current liabilities / advances', B.othLiab], ...(dL ? [['Difference in opening balances', dL]] : [])].filter((r, i) => i < 3 || Math.abs(r[1]) > 0.004);
+      const A = [['Fixed assets', B.fixed], ['Closing stock', B.inv], ['Sundry debtors', B.recv], ['Cash in hand', B.cash], ['Bank balance', B.bank], ['Input tax credit / taxes receivable', B.taxA], ['Other current assets / advances', B.othA], ...(dA ? [['Difference in opening balances', dA]] : [])].filter(r => Math.abs(r[1]) > 0.004);
+      const n = Math.max(L.length, A.length), rows = [];
+      for (let i = 0; i < n; i++) rows.push([L[i] ? L[i][0] : '', L[i] ? L[i][1] : '', A[i] ? A[i][0] : '', A[i] ? A[i][1] : '']);
+      R.sections.push({ cols: [C_('Liabilities'), C_('Amount (₹)', 1), C_('Assets'), C_('Amount (₹)', 1)], rows, total: ['Total', B.total, 'Total', B.total] });
+    } else {
+      const rows = [['I. EQUITY AND LIABILITIES', ''], ["(1) Shareholders' / owner's funds", ''], ['   (a) Capital', B.capital], ['   (b) Reserves & surplus (profit & loss)', r2(B.prior + B.cur)], ['        – earlier years', B.prior], ['        – current year', B.cur],
+        ['(2) Non-current liabilities', ''], ['   Long-term borrowings (loans)', B.loans], ['(3) Current liabilities', ''], ['   (a) Short-term borrowings (bank overdraft)', B.od], ['   (b) Trade payables', B.payables], ['   (c) Other current liabilities', B.othLiab], ['   (d) Duties & taxes (GST, TDS, TCS payable)', B.dutiesL], ...(dL ? [['Difference in opening balances', dL]] : []), ['TOTAL', B.total],
+        ['II. ASSETS', ''], ['(1) Non-current assets', ''], ['   Property, plant & equipment (fixed assets)', B.fixed], ['(2) Current assets', ''], ['   (a) Inventories (closing stock)', B.inv], ['   (b) Trade receivables', B.recv], ['   (c) Cash & cash equivalents', r2(B.cash + B.bank)], ['        – cash in hand', B.cash], ['        – bank balances', B.bank], ['   (d) Other current assets (input tax credit, advances)', r2(B.taxA + B.othA)], ...(dA ? [['Difference in opening balances', dA]] : [])];
+      R.sections.push({ cols: [C_('Particulars'), C_('Amount (₹)', 1)], rows, total: ['TOTAL', B.total] });
+    }
+    R.cards = [['Total Assets', inr(B.assets + dA)], ['Total Liabilities', inr(B.liab + dL)], [B.cur >= 0 ? 'Profit (this year)' : 'Loss (this year)', inr(B.cur)]];
+    if (Math.abs(B.diff) > 0.004) R.warn = [`Opening balances do not match by ${inr(Math.abs(B.diff))}. Go to Accounts → Opening Balances and add your capital (opening stock counts as an asset).`];
+    R.note = `As on ${fd(RANGE.to)}. Profit of years before ${fd(fyStart(RANGE.to))} is carried to capital; current year profit is from ${fd(fyStart(RANGE.to))}.`;
+  }
+  if (name === 'cf') {
+    R.title = 'Cash Flow';
+    const C = cfCalc(RANGE.from, RANGE.to); R.cf = C;
+    const rows = [['A. Cash from operating activities', ''], ['Net profit', C.np], ['(Increase) / decrease in stock', C.inv], ['(Increase) / decrease in trade receivables', C.recv], ['Increase / (decrease) in trade payables', C.pay], ['Increase / (decrease) in duties & taxes', C.duties], ['Change in other current assets / liabilities', C.oth], ['Net cash from operating activities', C.op],
+      ['B. Cash from investing activities', ''], ['(Purchase) / sale of fixed assets', C.fixed], ['Net cash from investing activities', C.fixed],
+      ['C. Cash from financing activities', ''], ['Capital introduced / (drawings)', C.capital], ['Loans taken / (repaid)', C.loans], ['Net cash from financing activities', C.fin],
+      ['Net change in cash & bank (A + B + C)', C.net], ['Cash & bank at start', C.open], ['Cash & bank at end', C.close]];
+    R.sections.push({ cols: [C_('Particulars'), C_('Amount (₹)', 1)], rows, total: ['Actual change in cash & bank', C.actual] });
+    R.cards = [['Operating', inr(C.op)], ['Investing', inr(C.fixed)], ['Financing', inr(C.fin)], ['Net change', inr(C.net)]];
+    R.note = 'Simple indirect method from your books.';
   }
   if (name === 'daybook') {
     R.title = 'Day Book';
@@ -2004,6 +2183,7 @@ function cellH(c, x) { if (c.n && typeof x === 'number') return `<td class="n ${
 function vReport(name) {
   const meta = ALL_REPORTS.find(r => r[0] === name);
   if (!meta || !repOk(meta[4])) return go('reports');
+  if (FINALS.includes(name) && !RANGE.touched) { RANGE.from = fyStart(); RANGE.to = today(); RANGE.p = 'fy'; }
   const R = buildReport(name);
   hdr(R.title, { back: true, right: `<button class="hbtn" aria-label="Excel" onclick="exportReport('${name}')" style="font-size:12px;font-weight:700;width:auto;padding:0 10px;border-radius:10px">⬇ Excel</button>` });
   const pr = [['today', 'Today'], ['month', 'This Month'], ['lmonth', 'Last Month'], ['fy', 'This FY'], ['all', 'All']];
@@ -2018,10 +2198,12 @@ function vReport(name) {
   ${R.note ? `<p class="mu" style="font-size:12px;margin:4px">${esc(R.note)}</p>` : ''}
   <button class="btn sec full" style="margin-top:8px" onclick="exportReport('${name}')">⬇ Download Excel (.csv)</button>`;
   const f = $('#rf'), t = $('#rt'), mm = $('#rm');
-  if (f) f.onchange = () => { RANGE.from = f.value || RANGE.from; RANGE.p = 'custom'; render(); };
+  if (f) f.onchange = () => { RANGE.from = f.value || RANGE.from; RANGE.p = 'custom'; RANGE.touched = true; render(); };
+  const fy = $('#fySel'); if (fy) fy.onchange = () => setFY(fy.value);
+  $$('[data-bsm]').forEach(b => { b.onclick = () => { BS_MODE = b.dataset.bsm; render(); }; });
   if (mm) mm.onchange = () => setMonth(mm.value);
   const la = $('#ledAcc'); if (la) la.onchange = () => replaceTo('r/ledger?acc=' + accEnc(la.value));
-  t.onchange = () => { RANGE.to = t.value || RANGE.to; RANGE.p = 'custom'; if (R.asOf && RANGE.from > RANGE.to) RANGE.from = RANGE.to; render(); };
+  t.onchange = () => { RANGE.to = t.value || RANGE.to; RANGE.p = 'custom'; RANGE.touched = true; if (R.asOf && RANGE.from > RANGE.to) RANGE.from = RANGE.to; render(); };
 }
 const repFile = R => `${R.title.replace(/\W+/g, '_')}_${RANGE.from}_${RANGE.to}`;
 function exportReport(name) {
@@ -2172,7 +2354,7 @@ function canSeeV(v) { return ROLE() !== 'billing' || !['purchase', 'pret', 'payo
 function routeAllowed(a, b) {
   switch (a) {
     case 'new': case 'pay': case 'acv': return canV(b);
-    case 'accounts': return can('reports');
+    case 'accounts': case 'brs': return can('reports');
     case 'edit': { const v = vch(b); return !v || canV(v.type); }
     case 'v': { const v = vch(b); return !v || canSeeV(v); }
     case 'exp': return b === 'new' ? canV('exp') : can('exp');
