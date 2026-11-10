@@ -202,10 +202,10 @@ details.dt[open]>summary{margin-bottom:10px}
 'use strict';
 /* ================= IndexedDB helper ================= */
 const DB = {
-  db: null,
+  db: null, name: 'erp-db', // one IndexedDB per company: 'erp-db' = this phone's own business, 'erp-db-<cid>' = a CA client
   open() {
     return new Promise((res, rej) => {
-      const r = indexedDB.open('erp-db', 1);
+      const r = indexedDB.open(DB.name, 1);
       r.onupgradeneeded = () => {
         const d = r.result;
         ['items', 'parties', 'vouchers'].forEach(s => { if (!d.objectStoreNames.contains(s)) d.createObjectStore(s, { keyPath: 'id' }); });
@@ -233,7 +233,7 @@ const DB = {
 
 /* ================= State ================= */
 const APP = 'LedgerOne', APP_SUB = 'Billing • GST • Accounts', APP_VER = '3.0';
-const S = { settings: null, items: [], parties: [], vouchers: [], audit: [] };
+const S = { settings: null, items: [], parties: [], vouchers: [], audit: [], queries: [] };
 const DEF_CO = () => ({ name: '', address: '', city: '', pin: '', gstin: '', state: '27', phone: '', email: '', prefix: 'INV-', ngPrefix: 'BL-', logo: '', bank: '', terms: 'Goods once sold will not be taken back.', openCash: 0, taxMode: 'regular', compRate: 1, fyNum: true, lut: false, lutNo: '', lutDate: '', turnover: 0, signatory: '' });
 const DEF_SETTINGS = () => ({ setupDone: false, company: DEF_CO(), pin: '', counters: {} });
 let CACHE = null;
@@ -247,13 +247,18 @@ function upgradeSettings(s) {
 async function loadAll() {
   S.settings = upgradeSettings(await DB.get('kv', 'settings'));
   S.items = await DB.all('items'); S.parties = await DB.all('parties');
-  const allV = await DB.all('vouchers'); S.vouchers = allV.filter(v => v.type !== AUD_T); S.audit = allV.filter(v => v.type === AUD_T);
+  const allV = await DB.all('vouchers'); S.vouchers = allV.filter(v => v.type !== AUD_T && v.type !== QRY_T); S.audit = allV.filter(v => v.type === AUD_T); S.queries = allV.filter(v => v.type === QRY_T);
   AUD.snap = clone(S.settings); dirty();
+  if (DB.name === 'erp-db') { try { if (S.settings.setupDone) localStorage.setItem('erpHome', co().name || 'My business'); else localStorage.removeItem('erpHome'); } catch (e) { } }
 }
-async function saveSettings() { S.settings.updatedAt = Date.now(); await DB.put('kv', S.settings, 'settings'); clPushSettings(); await audSettings(); }
+let SET_OK = false; // CA may only save settings through the period-lock actions
+async function caBase() { const st = upgradeSettings(await DB.get('kv', 'settings')); st.pin = S.settings.pin || ''; return st; } // CA: last synced copy, never local edits
+async function lockSave() { if (clOn() && ROLE() === 'ca') { const st = await caBase(); st.lockDate = S.settings.lockDate || ''; st.gstFiled = { ...(S.settings.gstFiled || {}) }; S.settings = st; } SET_OK = true; try { await saveSettings(); } finally { SET_OK = false; } }
+async function saveSettings() { if (clOn() && ROLE() === 'ca' && !SET_OK) { S.settings = await caBase(); await DB.put('kv', S.settings, 'settings'); return; } S.settings.updatedAt = Date.now(); await DB.put('kv', S.settings, 'settings'); clPushSettings(); await audSettings(); }
 async function saveRec(store, rec) {
   if (!canSave(store, rec)) { denyToast(); throw new Error('role'); }
   if (store === 'vouchers' && rec.type === AUD_T) throw new Error('audit');
+  if (store === 'vouchers' && rec.type === QRY_T) throw new Error('query');
   const old = await DB.get(store, rec.id);
   if (store === 'vouchers') { const le = lockErr(rec, old); if (le) { toast(le); throw new Error('locked'); } }
   if (store === 'vouchers' && rec.entries) { const er = acvErr(rec); if (er) { toast(er); throw new Error(er); } }
@@ -268,7 +273,7 @@ async function saveRec(store, rec) {
 async function delRec(store, id) {
   if (clOn() && !can('delete')) { denyToast(); throw new Error('role'); }
   const old = S[store].find(x => x.id === id) || await DB.get(store, id);
-  if (!old && store === 'vouchers' && S.audit.some(a => a.id === id)) throw new Error('audit');
+  if (!old && store === 'vouchers' && (S.audit.some(a => a.id === id) || S.queries.some(a => a.id === id))) throw new Error('audit');
   if (store === 'vouchers' && old) { if (old.type === AUD_T) throw new Error('audit'); const le = lockErr(old); if (le) { toast(le); throw new Error('locked'); } }
   await DB.del(store, id); S[store] = S[store].filter(x => x.id !== id); dirty(); clPushDel(store, id);
   if (old) await audLog('Delete', store, old, audSum(store, old));
@@ -348,9 +353,60 @@ async function audSettings() {
 /* ================= Period lock ================= */
 const lockDt = () => (S.settings && S.settings.lockDate) || '';
 function lockErr(v, old) { const L = lockDt(); if (!L) return ''; if ((v && v.date && v.date <= L) || (old && old.date && old.date <= L)) return `Books are locked up to ${fd(L)}. Entries dated on or before this cannot be added, changed or deleted. The Owner can unlock in Settings.`; return ''; }
-async function setLock(d) { if (!can('company')) return denyToast(); if (!d) return toast('Select a date'); S.settings.lockDate = d; await saveSettings(); toast('Books locked up to ' + fd(d) + ' ✓'); if (parseHash().parts[0] === 'settings') render(); }
-async function unlockBooks(sure) { if (!can('company')) return denyToast(); if (!lockDt()) return; if (!sure && !(await ask(`Unlock the books? Entries up to ${fd(lockDt())} can be changed again. This is recorded in the audit trail.`, { ok: 'Unlock', danger: true }))) return; S.settings.lockDate = ''; await saveSettings(); toast('Books unlocked'); if (parseHash().parts[0] === 'settings') render(); }
-async function markFiled(m, on) { if (!can('company')) return denyToast(); const g = { ...(S.settings.gstFiled || {}) }; if (on) g[m] = true; else delete g[m]; S.settings.gstFiled = g; await saveSettings(); }
+async function setLock(d) { if (!can('lock')) return denyToast(); if (!d) return toast('Select a date'); S.settings.lockDate = d; await lockSave(); toast('Books locked up to ' + fd(d) + ' ✓'); if (parseHash().parts[0] === 'settings') render(); }
+async function unlockBooks(sure) { if (!can('lock')) return denyToast(); if (!lockDt()) return; if (!sure && !(await ask(`Unlock the books? Entries up to ${fd(lockDt())} can be changed again. This is recorded in the audit trail.`, { ok: 'Unlock', danger: true }))) return; S.settings.lockDate = ''; await lockSave(); toast('Books unlocked'); if (parseHash().parts[0] === 'settings') render(); }
+async function markFiled(m, on) { if (!can('lock')) return denyToast(); const g = { ...(S.settings.gstFiled || {}) }; if (on) g[m] = true; else delete g[m]; S.settings.gstFiled = g; await lockSave(); }
+async function setCaLock(on) { if (ROLE() !== 'owner') return denyToast(); S.settings.caLock = !!on; await saveSettings(); if (clOn() && CL.db) CL.db.ref(`erp/${CL.cfg.cid}/caLock`).set(!!on).catch(e => { if (isDenied(e)) { CL.denied = true; clStatus(); } }); toast(on ? 'Your CA can lock periods ✓' : 'Only you can lock periods now'); }
+
+/* ================= Queries (questions between CA and business) =================
+   Stored as hidden records of type 'query' (id 'q_...') in the vouchers store / cloud collection, like the audit trail.
+   Split into S.queries on load and sync, so no bill list, report, count, numbering or export ever sees them. */
+const QRY_T = 'query';
+let QF = 'open';
+const qOpen = () => S.queries.filter(x => x.status !== 'resolved').length;
+function qLabel(x) { const v = x.ref && vch(x.ref); if (x.ref) return v ? audRef('vouchers', v) : (x.refLabel || 'Deleted entry'); if (x.month) return 'Period: ' + MON[+x.month.slice(5) - 1] + ' ' + x.month.slice(0, 4); return 'General question'; }
+async function qSave(x) {
+  if (!can('query')) { denyToast(); throw new Error('role'); }
+  x.updatedAt = Date.now(); if (!x.createdAt) x.createdAt = x.updatedAt;
+  await DB.put('vouchers', x); const i = S.queries.findIndex(y => y.id === x.id); if (i >= 0) S.queries[i] = x; else S.queries.push(x);
+  clPushRec('vouchers', x); return x;
+}
+async function qAdd(text, ref, month) {
+  text = String(text || '').trim(); if (!text) { toast('Type your question'); return null; }
+  const v = ref && vch(ref);
+  return qSave({ id: 'q_' + uid(), type: QRY_T, ref: ref || '', refLabel: v ? audRef('vouchers', v) : '', month: month || (v ? (v.date || '').slice(0, 7) : ''), text, by: audWho(), at: Date.now(), status: 'open', replies: [] });
+}
+async function qReply(id, resolve) {
+  const el = $('#qr_' + id), t = el ? el.value.trim() : '';
+  const o = S.queries.find(x => x.id === id); if (!o) return;
+  if (!t && !resolve) return toast('Type a reply');
+  const x = clone(o); if (t) x.replies = [...(x.replies || []), { by: audWho(), at: Date.now(), text: t }];
+  if (resolve) { x.status = 'resolved'; x.resolvedBy = audWho(); x.resolvedAt = Date.now(); }
+  await qSave(x); toast(resolve ? 'Marked resolved ✓' : 'Reply sent ✓'); render();
+}
+async function qReopen(id) { const o = S.queries.find(x => x.id === id); if (!o) return; const x = clone(o); x.status = 'open'; await qSave(x); toast('Question reopened'); render(); }
+function askSheet(ref) {
+  if (!can('query')) return denyToast();
+  sheet('Ask a question', `${ref ? `<div class="mu" style="font-size:13px;margin-bottom:8px">About <b>${esc(qLabel({ ref }))}</b></div>` : `<div class="f"><label>Month (optional)</label><input type="month" id="q_month"></div>`}<div class="f"><label>Your question</label><textarea id="q_text" placeholder="e.g. Please share the bill for this entry"></textarea></div>`, `<button class="btn full" id="q_go">Send Question</button>`);
+  $('#q_go').onclick = async () => { const r = await qAdd($('#q_text').value, ref, ref ? '' : ($('#q_month') || {}).value); if (r) { closeOv(); toast('Question sent ✓'); render(); } };
+}
+function qCard(x) {
+  const res = x.status === 'resolved';
+  return `<div class="card qc" data-id="${x.id}" data-st="${res ? 'resolved' : 'open'}" style="padding:10px 12px;margin-bottom:8px"><div style="display:flex;justify-content:space-between;gap:8px"><b>${esc(qLabel(x))}</b><span class="tag ${res ? 'g' : 'w'}">${res ? 'Resolved' : 'Open'}</span></div>
+  <div class="mu" style="font-size:12px">${audTime(x)} · ${esc(x.by || '')}</div><div style="margin-top:4px;white-space:pre-wrap">${esc(x.text)}</div>
+  ${x.ref && vch(x.ref) ? `<button class="btn ghost sm" style="margin-top:6px" onclick="go('v/${x.ref}')">Open entry</button>` : ''}
+  ${(x.replies || []).map(r => `<div class="qr" style="border-left:3px solid #c7d2fe;padding-left:8px;margin-top:8px;font-size:13px"><div class="mu" style="font-size:11.5px">${audTime(r)} · ${esc(r.by || '')}</div><div style="white-space:pre-wrap">${esc(r.text)}</div></div>`).join('')}
+  ${res ? `<div class="mu" style="font-size:12px;margin-top:6px">Resolved${x.resolvedBy ? ' by ' + esc(x.resolvedBy) : ''}</div><div class="btns" style="margin-top:6px"><button class="btn ghost sm" onclick="qReopen('${x.id}')">Reopen</button></div>`
+      : `<div class="f" style="margin-top:8px"><textarea class="q_rep" id="qr_${x.id}" rows="2" placeholder="Write a reply..."></textarea></div><div class="btns"><button class="btn sm" onclick="qReply('${x.id}')">Reply</button><button class="btn ok sm" onclick="qReply('${x.id}',1)">Mark resolved</button></div>`}</div>`;
+}
+function vQueries() {
+  hdr('Queries', { back: true });
+  const L = S.queries.filter(x => QF === 'all' || (QF === 'resolved' ? x.status === 'resolved' : x.status !== 'resolved')).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+  const nres = S.queries.length - qOpen();
+  $('#main').innerHTML = `<div class="seg" id="qf">${[['open', `Open (${qOpen()})`], ['resolved', `Resolved (${nres})`], ['all', 'All']].map(([k, l]) => `<button type="button" data-v="${k}" class="${QF === k ? 'on' : ''}" onclick="QF='${k}';render()">${l}</button>`).join('')}</div>
+  <button class="btn full" id="qNew" style="margin:10px 0" onclick="askSheet('')">+ Ask a question</button>
+  <div id="qList">${L.length ? L.map(qCard).join('') : emptyBox('💬', 'No questions here', '<p class="mu">Questions between you and your accountant, with replies, appear here.</p>')}</div>`;
+}
 window.addEventListener('unhandledrejection', e => { const m = e.reason && e.reason.message; if (m === 'locked' || m === 'role' || m === 'audit') e.preventDefault(); });
 const item = id => S.items.find(x => x.id === id);
 const party = id => S.parties.find(x => x.id === id);
@@ -787,6 +843,7 @@ function render() {
   applyRole();
 }
 function route() {
+  if (parseHash().parts[0] === 'clients') { setTabs(null); return vClients(); }
   if (!S.settings.setupDone) { setTabs(null); return vSetup(); }
   const { parts, q } = parseHash(); const [a, b, c] = parts;
   if (!routeAllowed(a, b)) { denyToast(); return replaceTo('home'); }
@@ -815,6 +872,7 @@ function route() {
       case 'acv': return vAcvForm(b, null);
       case 'settings': return vSettings();
       case 'audit': return vAudit(b);
+      case 'queries': return vQueries();
       default: go('home');
     }
   } catch (e) { console.warn(e); $('#main').innerHTML = emptyBox('⚠️', 'Something went wrong', esc(e.message)); }
@@ -845,7 +903,7 @@ function vSetup() {
     <div class="f"><label>Logo (optional)</label><div style="display:flex;gap:12px;align-items:center">${c.logo ? `<img class="logo-prev" src="${c.logo}" alt="logo">` : '<div class="logo-prev" style="display:grid;place-items:center;color:#aaa">Logo</div>'}<label class="btn sec sm" style="margin:0">Upload<input type="file" accept="image/*" hidden onchange="pickLogo(this,()=>{WIZ.c.logo=LOGO_TMP;vSetup()})"></label>${c.logo ? '<button class="btn ghost sm" onclick="WIZ.c.logo=\'\';vSetup()">Remove</button>' : ''}</div></div>
     <div class="f"><label>Bank details (invoice footer)</label><textarea id="w_bank" placeholder="Bank: SBI&#10;A/c No: 1234567890&#10;IFSC: SBIN0001234">${esc(c.bank)}</textarea></div>
     <div class="f"><label>Terms (invoice footer)</label><textarea id="w_terms">${esc(c.terms)}</textarea></div>`;
-  $('#main').innerHTML = `<div class="steps">${[1, 2, 3].map(i => `<i class="${i <= s ? 'on' : ''}"></i>`).join('')}</div><div class="card">${body}</div>${s === 1 ? (CL.cfg ? `<div class="card" style="font-size:13px">☁️ Cloud login: <b>${esc(CL.cfg.email)}</b> · <span id="cloudStatus" class="tag ${clState().c}">${esc(clState().t)}</span><div class="mu" style="margin-top:4px">Loading company data... If nothing appears, ask the Owner to finish the business setup.</div><button class="btn ghost sm" style="margin-top:8px" onclick="clLogout()">Logout</button></div>` : `<div class="card" style="text-align:center"><div class="mu" style="font-size:13px;margin-bottom:8px">Are you staff, or is your company already on the cloud?</div><button class="btn ghost full" id="wizLogin" onclick="cloudSheet('login')">☁️ Cloud Login</button></div>`) : ''}`;
+  $('#main').innerHTML = `<div class="steps">${[1, 2, 3].map(i => `<i class="${i <= s ? 'on' : ''}"></i>`).join('')}</div><div class="card">${body}</div>${s === 1 ? (CL.cfg ? `<div class="card" style="font-size:13px">☁️ Cloud login: <b>${esc(CL.cfg.email)}</b> · <span id="cloudStatus" class="tag ${clState().c}">${esc(clState().t)}</span><div class="mu" style="margin-top:4px">Loading company data... If nothing appears, ask the Owner to finish the business setup.</div>${CL.cfg.role === 'ca' ? `<button class="btn sec sm" style="margin-top:8px" onclick="go('clients')">👥 My Clients</button>` : `<button class="btn ghost sm" style="margin-top:8px" onclick="clLogout()">Logout</button>`}</div>` : `<div class="card" style="text-align:center"><div class="mu" style="font-size:13px;margin-bottom:8px">Are you staff, or is your company already on the cloud?</div><button class="btn ghost full" id="wizLogin" onclick="cloudSheet('login')">☁️ Cloud Login</button><button class="btn ghost full" id="wizCa" style="margin-top:8px" onclick="caSheet()">👔 Accountant / CA Login</button>${caAcct() ? `<button class="btn sec full" style="margin-top:8px" onclick="go('clients')">👥 My Clients</button>` : ''}</div>`) : ''}`;
   const sb = document.createElement('div'); sb.className = 'savebar'; sb.id = 'fab';
   sb.innerHTML = `${s > 1 ? '<button class="btn ghost" onclick="wizNext(-1)">Back</button>' : '<div class="tot">Step 1 / 3</div>'}<button class="btn" id="wizGo" onclick="wizNext(1)">${s < 3 ? 'Next →' : 'Get Started ✓'}</button>`;
   const old = $('#fab'); if (old) old.remove(); document.body.appendChild(sb);
@@ -878,7 +936,8 @@ function pickLogo(inp, cb) {
 /* ================= Home ================= */
 function vHome() {
   const C = compute(); const t = today(), ms = monthStart();
-  hdr(co().name || 'Home', { right: searchBtn() + `<button class="hbtn" aria-label="Settings" onclick="go('settings')">${ICON.dots}</button>` });
+  hdr(co().name || 'Home', { right: (caAcct() ? `<button class="hbtn" id="toClients" aria-label="My Clients" title="My Clients" onclick="go('clients')">👥</button>` : '') + searchBtn() + `<button class="hbtn" aria-label="Settings" onclick="go('settings')">${ICON.dots}</button>` });
+  const nq = can('query') ? qOpen() : 0;
   const saleNet = (from, to) => S.vouchers.reduce((s, v) => v.date >= from && v.date <= to ? s + (v.type === 'sale' || v.type === 'dn' ? num(v.total) : v.type === 'sret' || v.type === 'cn' ? -num(v.total) : 0) : s, 0);
   const todaySale = saleNet(t, t), monSale = saleNet(ms, t);
   // 7 day chart
@@ -891,7 +950,8 @@ function vHome() {
   S.vouchers.forEach(v => { if (v.type === 'sale' && v.date >= ms && v.date <= t) v.lines.forEach(l => { const a = agg.get(l.itemId) || { q: 0, a: 0, name: l.name, unit: l.unit }; a.q += num(l.qty); a.a += num(l.taxable); agg.set(l.itemId, a); }); });
   const top = [...agg.values()].sort((x, y) => y.a - x.a).slice(0, 5);
   const recent = [...S.vouchers].sort(vSort).slice(0, 5);
-  $('#main').innerHTML = `
+  $('#main').innerHTML = `${ROLE() === 'ca' ? `<div class="card" id="caBanner" style="font-size:13px;border-left:4px solid #6366f1">👔 You are viewing <b>${esc(co().name || 'client')}</b> as Accountant / CA (read-only). <a href="#/clients">Switch client</a></div>` : ''}
+  ${nq ? `<div class="card" id="qBadge" onclick="go('queries')" style="cursor:pointer;border-left:4px solid #f59e0b;display:flex;align-items:center;gap:8px">💬 <b><span id="qCount">${nq}</span> open question${nq === 1 ? '' : 's'}</b><span class="mu" style="font-size:12.5px">— tap to view and reply</span></div>` : ''}
   <div class="search" onclick="go('search')">${ICON.search}<input placeholder="Search party, item, invoice..." readonly onfocus="go('search')"></div>
   <div class="grid2">
     <div class="stat b" onclick="go('r/sales')"><div class="l">Today's Sales</div><div class="v" id="dTodaySale">${inr(todaySale)}</div></div>
@@ -1125,7 +1185,7 @@ function exportLedger(id) {
 /* ================= More ================= */
 function vMore() {
   hdr('More', { right: searchBtn() });
-  const m = [['reports', '📊', 'Reports'], ['exp', '💸', 'Expenses'], ['prod', '🏭', 'Production'], ['bill?f=quote', '📝', 'Quotations'], ['bill?f=pay', '💰', 'Payments'], ['bill?f=ret', '↩', 'Returns / CN / DN'], ...(taxMode() === 'regular' ? [['r/gstr1', '📤', 'GSTR-1'], ['r/gstr3b', '🧮', 'GSTR-3B']] : taxMode() === 'composition' ? [['r/cmp08', '🧾', 'CMP-08']] : []), ['r/pl', '📈', 'Profit & Loss'], ['r/bs', '🏛', 'Balance Sheet'], ['accounts', '📚', 'Accounts'], ['r/tb', '⚖️', 'Trial Balance'], ['brs', '🏦', 'Bank Reconciliation'], ['tax', '💡', 'Tax Saving'], ['audit', '🕵', 'Audit Trail'], ['settings', '⚙️', 'Settings & Backup']];
+  const m = [['reports', '📊', 'Reports'], ['exp', '💸', 'Expenses'], ['prod', '🏭', 'Production'], ['bill?f=quote', '📝', 'Quotations'], ['bill?f=pay', '💰', 'Payments'], ['bill?f=ret', '↩', 'Returns / CN / DN'], ...(taxMode() === 'regular' ? [['r/gstr1', '📤', 'GSTR-1'], ['r/gstr3b', '🧮', 'GSTR-3B']] : taxMode() === 'composition' ? [['r/cmp08', '🧾', 'CMP-08']] : []), ['r/pl', '📈', 'Profit & Loss'], ['r/bs', '🏛', 'Balance Sheet'], ['accounts', '📚', 'Accounts'], ['r/tb', '⚖️', 'Trial Balance'], ['brs', '🏦', 'Bank Reconciliation'], ['tax', '💡', 'Tax Saving'], ['audit', '🕵', 'Audit Trail'], ...(can('query') ? [['queries', '💬', 'Queries' + (qOpen() ? ` (${qOpen()})` : '')]] : []), ...(caAcct() ? [['clients', '👥', 'My Clients']] : []), ['settings', '⚙️', 'Settings & Backup']];
   $('#main').innerHTML = `<div class="mgrid">${m.map(([h, i, l]) => `<button onclick="go('${h}')"><span class="i">${i}</span>${l}</button>`).join('')}</div>
   <div class="card"><h3>New Entry</h3><div class="btns"><button class="btn" onclick="go('new/sale')">+ Sales Invoice</button><button class="btn sec" onclick="go('new/purchase')">+ Purchase Bill</button><button class="btn ghost" onclick="go('new/quote')">+ Quotation</button></div></div>
   <div class="card"><div class="kv"><span>Business</span><b>${esc(co().name)}</b></div><div class="kv"><span>Tax mode</span><span id="moreTax">${TAXMODES.find(x => x[0] === taxMode())[1]}</span></div>${isGstCo() ? `<div class="kv"><span>GSTIN</span><span>${esc(co().gstin || '—')}</span></div>` : ''}<div class="kv"><span>Data</span><span>${S.items.length} items · ${S.parties.length} parties · ${S.vouchers.length} entries</span></div></div>`;
@@ -1453,7 +1513,7 @@ function vView(id) {
   }
   const lk = lockErr(v), hist = S.audit.filter(a => a.rid === v.id).length;
   h = (lk ? `<div class="card" id="lockBanner" style="border-left:4px solid var(--bad)"><b>🔒 Locked period</b><div class="mu" style="font-size:12.5px">Books are locked up to ${fd(lockDt())}. This entry cannot be changed or deleted.</div></div>` : '') + h +
-    (can('reports') ? `<div class="btns" style="margin-top:10px"><button class="btn ghost sm" id="histBtn" onclick="go('audit/${v.id}')">🕓 History (${hist})</button></div>` : '');
+    `<div class="btns" style="margin-top:10px">${can('reports') ? `<button class="btn ghost sm" id="histBtn" onclick="go('audit/${v.id}')">🕓 History (${hist})</button>` : ''}${can('query') ? `<button class="btn ghost sm" id="askBtn" onclick="askSheet('${v.id}')">💬 Ask a question${(() => { const n = S.queries.filter(x => x.ref === v.id && x.status !== 'resolved').length; return n ? ` (${n} open)` : ''; })()}</button>` : ''}</div>`;
   $('#main').innerHTML = h;
   const cs = $('#copySel'); if (cs) cs.onchange = () => { const w = $('.inv-wrap'); const k = cs.value; w.innerHTML = invoiceHTML(v, k && k !== 'all' ? COPIES.find(x => x[0] === k)[1] : k === 'all' ? COPIES[0][1] : ''); fitInv(); };
   fitInv();
@@ -2660,11 +2720,12 @@ function exportAudit(rid) {
   download(`Audit_Trail_${today()}.csv`, toCSV([['Date & time', 'User', 'Action', 'Record type', 'Record', 'Changes'], ...rows.map(a => [audTime(a), a.who, a.act, a.rt, a.ref, a.ch])]), 'text/csv'); toast('Audit trail CSV is downloading');
 }
 function lockCardHTML() {
-  const L = lockDt(), own = can('company'), fy = fyStart(), F = S.settings.gstFiled || {}, ms = [];
+  const L = lockDt(), own = can('lock'), fy = fyStart(), F = S.settings.gstFiled || {}, ms = [];
   for (let d = fy; d <= today(); d = addDays(monthEnd(d), 1)) ms.push(d.slice(0, 7));
   const pf = fyStart(addDays(fy, -1)); for (let d = pf; d < fy; d = addDays(monthEnd(d), 1)) ms.unshift(d.slice(0, 7));
   return `<div class="sect">Period Lock</div><div class="card" id="lockCard"><div class="kv"><span>Books locked up to</span><b id="lockState">${L ? fd(L) + ' 🔒' : 'Not locked'}</b></div>
   <p class="mu" style="font-size:12px;margin:6px 0 10px">Lock the books after you file GST returns or close the year. Entries dated on or before the lock date cannot be added, changed or deleted.${own ? '' : ' Only the Owner can change this.'}</p>
+  ${ROLE() === 'owner' && clOn() ? `<label class="ck"><input type="checkbox" id="lk_ca" ${S.settings.caLock !== false ? 'checked' : ''} onchange="setCaLock(this.checked)"> <span>Allow CA to lock periods and mark GST returns filed</span></label>` : ''}
   ${own ? `<div class="f2"><div class="f"><label>Lock up to</label><input type="date" id="lk_date" value="${L}"></div><div class="f" style="display:flex;align-items:flex-end;gap:6px"><button class="btn sm" id="lk_set" onclick="setLock($('#lk_date').value)">Lock</button>${L ? `<button class="btn dan sm" id="lk_un" onclick="unlockBooks()">Unlock</button>` : ''}</div></div>` : ''}
   ${isGstCo() ? `<details><summary style="font-size:13px;cursor:pointer">GST return filed (by month)</summary><div style="display:grid;grid-template-columns:1fr 1fr;gap:2px;margin-top:6px">${ms.map(m => `<label class="ck" style="margin:0"><input type="checkbox" data-m="${m}" ${F[m] ? 'checked' : ''} ${own ? '' : 'disabled'} onchange="markFiled('${m}', this.checked)"> <span>${MON[+m.slice(5) - 1]} ${m.slice(0, 4)}</span></label>`).join('')}</div></details>` : ''}</div>`;
 }
@@ -2720,7 +2781,7 @@ function vSettings() {
   };
 }
 async function backup() {
-  const data = { app: 'erp-pwa', version: 1, exportedAt: new Date().toISOString(), settings: S.settings, items: S.items, parties: S.parties, vouchers: S.vouchers, audit: S.audit };
+  const data = { app: 'erp-pwa', version: 1, exportedAt: new Date().toISOString(), settings: S.settings, items: S.items, parties: S.parties, vouchers: S.vouchers, audit: S.audit, queries: S.queries };
   download(`LedgerOne_Backup_${(co().name || 'business').replace(/\W+/g, '_')}_${today()}.json`, JSON.stringify(data), 'application/json');
   toast('Backup is downloading');
 }
@@ -2734,7 +2795,8 @@ function restore(inp) {
     const old = {}; for (const s of SYNC_COLS) old[s] = S[s].map(x => x.id); old.au = new Set(S.audit.map(a => a.id));
     if (clOn()) { const t = Date.now(); for (const s of SYNC_COLS) d[s].forEach(r => r.updatedAt = t); d.settings.updatedAt = t; d.settings.pin = S.settings.pin || ''; }
     const keepA = new Map(S.audit.map(a => [a.id, a])); (Array.isArray(d.audit) ? d.audit : []).forEach(a => { if (a && a.type === AUD_T && a.id && !keepA.has(a.id)) keepA.set(a.id, a); });
-    d.vouchers = d.vouchers.filter(v => v.type !== AUD_T);
+    (Array.isArray(d.queries) ? d.queries : []).forEach(a => { if (a && a.type === QRY_T && a.id && !keepA.has(a.id)) keepA.set(a.id, a); }); S.queries.forEach(a => keepA.set(a.id, a));
+    d.vouchers = d.vouchers.filter(v => v.type !== AUD_T && v.type !== QRY_T);
     for (const s of ['items', 'parties', 'vouchers']) { await DB.clear(s); await DB.bulk(s, d[s]); }
     await DB.bulk('vouchers', [...keepA.values()]);
     await DB.put('kv', upgradeSettings(d.settings), 'settings'); await loadAll();
@@ -2747,7 +2809,7 @@ function restore(inp) {
 }
 async function resetAll() {
   if (!(await ask('All data (items, parties, bills) will be deleted permanently. Have you taken a backup?<br><br>The audit trail is <b>kept</b> — it cannot be deleted, and this deletion will be recorded in it.', { ok: 'Yes, Delete', danger: true }))) return;
-  const keepA = [...S.audit];
+  const keepA = [...S.audit, ...S.queries];
   if (!(await ask('Are you sure? This cannot be undone.', { ok: 'Delete', danger: true }))) return;
   if (clOn()) { if (!can('reset')) return denyToast(); for (const s of SYNC_COLS) for (const r of S[s]) await clPushDel(s, r.id); for (const s of SYNC_COLS) await DB.clear(s); await DB.bulk('vouchers', keepA); const keep = { ...DEF_SETTINGS(), updatedAt: Date.now() }; await DB.put('kv', keep, 'settings'); await loadAll(); await clPushSettings(); await audLog('Delete all data', 'settings', null, 'All items, parties and entries deleted (cloud too)', 'Data', 'All data'); toast('All data deleted (cloud too)'); return replaceTo('home'); }
   for (const s of ['items', 'parties', 'vouchers', 'kv']) await DB.clear(s);
@@ -2782,8 +2844,8 @@ async function removePin() { if (!(await ask('Remove the PIN lock?', { ok: 'Remo
 const FB_CFG = { apiKey: "AIzaSyBuG7ZWKH74-cOejWzw8N_X-PoEn61Tvus", authDomain: "qr-menu-f5e9a.firebaseapp.com", databaseURL: "https://qr-menu-f5e9a-default-rtdb.firebaseio.com", projectId: "qr-menu-f5e9a", appId: "1:613360886334:web:ae1a322f2a470c2644276f" };
 const FB_VER = '10.12.2';
 const SYNC_COLS = ['items', 'parties', 'vouchers'];
-const ROLES = { owner: 'Owner', manager: 'Manager', billing: 'Billing Staff', viewer: 'Viewer (read-only)' };
-const ROLE_INFO = { owner: 'Full access', manager: 'Everything except staff, company settings and restore', billing: 'Sales invoices and quotations only; can view items/parties, no reports', viewer: 'Can view only, cannot change anything' };
+const ROLES = { owner: 'Owner', manager: 'Manager', billing: 'Billing Staff', viewer: 'Viewer (read-only)', ca: 'Accountant / CA' };
+const ROLE_INFO = { owner: 'Full access', manager: 'Everything except staff, company settings and restore', billing: 'Sales invoices and quotations only; can view items/parties, no reports', viewer: 'Can view only, cannot change anything', ca: 'Sees all entries and reports, exports them and asks questions; cannot change anything' };
 const CL = { cfg: null, q: {}, tombs: {}, online: navigator.onLine, connected: false, user: null, app: null, db: null, auth: null, subs: [], inflight: new Set(), denied: false, sdk: 'none', started: false, chain: Promise.resolve(), renderT: 0 };
 const clOn = () => !!(CL.cfg && CL.cfg.cid);
 const ROLE = () => clOn() ? (CL.cfg.role || 'viewer') : 'owner';
@@ -2791,9 +2853,11 @@ function can(x) {
   const r = ROLE();
   if (r === 'owner') return true;
   switch (x) {
-    case 'write': return r !== 'viewer';
+    case 'write': return r !== 'viewer' && r !== 'ca';
     case 'masters': case 'delete': return r === 'manager';
-    case 'reports': case 'cost': case 'exp': return r === 'manager' || r === 'viewer';
+    case 'reports': case 'cost': case 'exp': return r === 'manager' || r === 'viewer' || r === 'ca';
+    case 'query': return r === 'manager' || r === 'ca';
+    case 'lock': return r === 'ca' && !!S.settings && S.settings.caLock !== false;
     case 'staff': case 'company': case 'restore': case 'reset': return false;
     default: return false;
   }
@@ -2812,6 +2876,7 @@ function routeAllowed(a, b) {
     case 'reports': return can('reports');
     case 'r': return can('reports');
     case 'audit': return can('reports');
+    case 'queries': return can('query');
     default: return true;
   }
 }
@@ -2925,7 +2990,7 @@ window.addEventListener('offline', () => { CL.online = false; clStatus(); });
 /* ---------- remote merge (last write wins) ---------- */
 function localU(col, id) {
   if (col === 'settings') return S.settings.updatedAt || 0;
-  const r = S[col].find(x => x.id === id) || (col === 'vouchers' ? S.audit.find(x => x.id === id) : null); const t = CL.tombs[col + '/' + id] || 0;
+  const r = S[col].find(x => x.id === id) || (col === 'vouchers' ? (S.audit.find(x => x.id === id) || S.queries.find(x => x.id === id)) : null); const t = CL.tombs[col + '/' + id] || 0;
   return Math.max(r ? (r.updatedAt || 0) : 0, t);
 }
 function applyRemote(col, id, val) {
@@ -2944,6 +3009,11 @@ function applyRemote(col, id, val) {
       let rec; try { rec = JSON.parse(val.j); } catch (e) { return; } if (rec.type !== AUD_T) return;
       rec.updatedAt = val.updatedAt; rec.id = id; await DB.put(col, rec);
       const i = S.audit.findIndex(x => x.id === id); if (i >= 0) S.audit[i] = rec; else S.audit.push(rec); return;
+    } else if (col === 'vouchers' && (String(id).startsWith('q_') || S.queries.some(x => x.id === id))) {
+      if (val.deleted) return; // queries are never deleted
+      let rec; try { rec = JSON.parse(val.j); } catch (e) { return; } if (rec.type !== QRY_T) return;
+      rec.updatedAt = val.updatedAt; rec.id = id; await DB.put(col, rec);
+      const i = S.queries.findIndex(x => x.id === id); if (i >= 0) S.queries[i] = rec; else S.queries.push(rec);
     } else if (val.deleted) {
       await DB.del(col, id); S[col] = S[col].filter(x => x.id !== id); CL.tombs[qk] = val.updatedAt; await clSaveTombs();
     } else {
@@ -2962,7 +3032,7 @@ function clRerender() {
     const { parts } = parseHash(); const [a, b] = parts;
     if ($('#ov').classList.contains('on')) return;
     if (!S.settings.setupDone || (a === 'setup')) return render();
-    const safe = ['home', 'bill', 'stock', 'party', 'more', 'v', 'p', 'reports', 'r'].includes(a) || ((a === 'exp' || a === 'prod') && b !== 'new');
+    const safe = ['home', 'bill', 'stock', 'party', 'more', 'v', 'p', 'reports', 'r'].includes(a) || (a === 'queries' && !$$('.q_rep').some(t => t.value)) || ((a === 'exp' || a === 'prod') && b !== 'new');
     if (safe) render();
   }, 250);
 }
@@ -2997,16 +3067,17 @@ async function clAttach() {
     sub(base.child(`members/${c.uid}`), 'value', async s => {
       const m = s.val(); CL.denied = false;
       if (!m) { await clRemoved(); return; }
+      if (m.role === 'ca') caSynced(c.cid);
       if (m.role !== c.role || m.name !== c.name) { c.role = m.role; c.name = m.name || c.name; await clSaveCfg(); render(); }
       clStatus();
-    }, onErr);
+    }, e => { if (isDenied(e) && c.role === 'ca') { clRemoved(); return; } onErr(e); });
     if (!c.inited) { const ok = await initialSync(); if (!ok) return; }
     for (const col of [...SYNC_COLS, 'settings']) {
       const r = base.child(`data/${col}`);
       sub(r, 'child_added', s => applyRemote(col, s.key, s.val()), onErr);
       sub(r, 'child_changed', s => applyRemote(col, s.key, s.val()), onErr);
     }
-    CL.attached = c.cid; clFlush();
+    CL.attached = c.cid; if (c.role === 'ca') caSynced(c.cid); clFlush();
   } finally { ATTACHING = false; clStatus(); }
 }
 async function createCompany() {
@@ -3025,7 +3096,7 @@ async function initialSync() {
       const snap = await base.child(col).once('value'); const remote = snap.val() || {};
       if (c.uploadLocal !== false) {
         if (col === 'settings') { const r = remote.main; if (S.settings.setupDone && (!r || (S.settings.updatedAt || 0) > r.updatedAt)) { if (!S.settings.updatedAt) S.settings.updatedAt = Date.now(); await DB.put('kv', S.settings, 'settings'); CL.q['settings/main'] = settingsPayload(); } }
-        else (col === 'vouchers' ? [...S.vouchers, ...S.audit] : S[col]).forEach(rec => { const r = remote[rec.id]; if (!rec.updatedAt) rec.updatedAt = Date.now(); if (!r || rec.updatedAt > r.updatedAt) CL.q[col + '/' + rec.id] = { updatedAt: rec.updatedAt, j: JSON.stringify(rec) }; });
+        else (col === 'vouchers' ? [...S.vouchers, ...S.audit, ...S.queries] : S[col]).forEach(rec => { const r = remote[rec.id]; if (!rec.updatedAt) rec.updatedAt = Date.now(); if (!r || rec.updatedAt > r.updatedAt) CL.q[col + '/' + rec.id] = { updatedAt: rec.updatedAt, j: JSON.stringify(rec) }; });
       }
       for (const [id, val] of Object.entries(remote)) await applyRemote(col, id, val);
     }
@@ -3033,6 +3104,7 @@ async function initialSync() {
   } catch (e) { if (isDenied(e)) CL.denied = true; else console.warn('init', e && e.code); clStatus(); return false; }
 }
 async function clRemoved() {
+  if (CL.cfg && CL.cfg.role === 'ca') return caRemoved(CL.cfg.cid);
   clDetach(); try { await CL.auth.signOut(); } catch (e) { }
   CL.cfg = null; CL.q = {}; CL.started = false; await DB.del('kv', 'cloud'); await clSaveQ();
   await ask('The Owner has removed you from the company. Cloud sync has stopped. (Local data on this phone is kept.)', { ok: 'OK', cancel: 'Close' });
@@ -3076,7 +3148,12 @@ async function clLogin() {
   const u = cred.user;
   try {
     const cid = (await CL.db.ref(`erpUsers/${u.uid}`).once('value')).val();
-    if (!cid) { await CL.auth.signOut(); return reset('This account is not part of any company. Ask the Owner to add you as staff.'); }
+    if (!cid) {
+      let L = {}; try { L = await caAccept(u, ''); } catch (e) { }
+      if (Object.keys(L).length) { caSetAcct(u, ''); closeOv(); toast('Logged in as Accountant / CA ✓'); go('clients'); return; }
+      await CL.auth.signOut(); return reset('This account is not part of any company. Ask the Owner to add you as staff, or to invite you as their CA.');
+    }
+    try { const L = await caAccept(u, m && m.name); if (Object.keys(L).length) caSetAcct(u, m && m.name); } catch (e) { }
     const m = (await CL.db.ref(`erp/${cid}/members/${u.uid}`).once('value')).val();
     if (!m) { await CL.auth.signOut(); return reset('You have been removed from the company.'); }
     let company = ''; try { company = ((await CL.db.ref(`erp/${cid}/info`).once('value')).val() || {}).name || ''; } catch (e) { }
@@ -3097,6 +3174,7 @@ async function clLogin() {
   }
 }
 async function clLogout() {
+  if (CL.cfg && CL.cfg.role === 'ca') return caLogout();
   const n = Object.keys(CL.q).length;
   if (!(await ask(`Log out of the cloud?${n ? `<br><br>⚠️ ${n} entries have not reached the cloud yet — they will stay only on this phone.` : ''}<br>Local data on this phone is kept.`, { ok: 'Logout', danger: !!n }))) return;
   clDetach(); try { if (CL.auth) await CL.auth.signOut(); } catch (e) { }
@@ -3112,7 +3190,8 @@ async function loadStaff() {
   if (!CL.db || !CL.user) { el.innerHTML = '<div class="mu" style="font-size:13px">Internet is needed to load the staff list.</div>'; return; }
   try {
     const m = (await CL.db.ref(`erp/${CL.cfg.cid}/members`).once('value')).val() || {}; STAFF = m;
-    el.innerHTML = Object.entries(m).sort((a, b) => (a[1].role === 'owner' ? -1 : 0) - (b[1].role === 'owner' ? -1 : 0)).map(([id, x]) => `<div class="row" ${x.role === 'owner' ? 'style="cursor:default"' : `onclick="staffEdit('${id}')"`}><div class="av">${esc(initials(x.name || x.email))}</div><div class="m"><div class="t">${esc(x.name || x.email)}</div><div class="s">${esc(x.email)}</div></div><div class="rt"><span class="tag ${x.role === 'owner' ? 'g' : x.role === 'viewer' ? 'x' : ''}">${esc(ROLES[x.role] || x.role)}</span></div></div>`).join('');
+    caCardFill(m);
+    el.innerHTML = Object.entries(m).filter(([, x]) => x.role !== 'ca').sort((a, b) => (a[1].role === 'owner' ? -1 : 0) - (b[1].role === 'owner' ? -1 : 0)).map(([id, x]) => `<div class="row" ${x.role === 'owner' ? 'style="cursor:default"' : `onclick="staffEdit('${id}')"`}><div class="av">${esc(initials(x.name || x.email))}</div><div class="m"><div class="t">${esc(x.name || x.email)}</div><div class="s">${esc(x.email)}</div></div><div class="rt"><span class="tag ${x.role === 'owner' ? 'g' : x.role === 'viewer' ? 'x' : ''}">${esc(ROLES[x.role] || x.role)}</span></div></div>`).join('');
   } catch (e) { el.innerHTML = `<div class="rd" style="font-size:13px">${isDenied(e) ? 'Rules not published — staff list unavailable.' : 'Could not load the staff list.'}</div>`; if (isDenied(e)) { CL.denied = true; clStatus(); } }
 }
 const roleOpts = sel => ['manager', 'billing', 'viewer'].map(r => `<option value="${r}" ${r === sel ? 'selected' : ''}>${ROLES[r]} — ${ROLE_INFO[r]}</option>`).join('');
@@ -3159,13 +3238,145 @@ function staffEdit(id) {
   };
 }
 
+/* ---------- Accountant / CA: invites, client list, switching companies ----------
+   Owner invites by email -> /erp/{cid}/caInvites/{ek} + /caInvitesByEmail/{ek}/{cid}=true.
+   CA logs in with that email -> writes /erp/{cid}/members/{uid}={role:'ca'} and /erpCA/{uid}/{cid}.
+   Each client company is kept in its own IndexedDB ('erp-db-<cid>') so clients never mix. */
+const emailKey = e => String(e || '').trim().toLowerCase().replace(/\./g, ',');
+const lsJ = (k, d) => { try { return JSON.parse(localStorage.getItem(k) || 'null') || d; } catch (e) { return d; } };
+const lsS = (k, v) => { try { if (v == null) localStorage.removeItem(k); else localStorage.setItem(k, JSON.stringify(v)); } catch (e) { } };
+const caAcct = () => lsJ('erpCA', null);
+const caList = () => lsJ('erpCAList', {});
+function caSetAcct(u, name) { const o = caAcct() || {}; lsS('erpCA', { uid: u.uid, email: String(u.email || '').toLowerCase(), name: name || (o.uid === u.uid ? o.name : '') || '' }); }
+function caSynced(cid) { const m = lsJ('erpCAsync', {}); m[cid] = Date.now(); lsS('erpCAsync', m); }
+async function caAccept(u, name) {
+  const ek = emailKey(u.email);
+  const mine = (await CL.db.ref(`erpCA/${u.uid}`).once('value')).val() || {};
+  let inv = {}; try { inv = (await CL.db.ref(`caInvitesByEmail/${ek}`).once('value')).val() || {}; } catch (e) { if (isDenied(e)) throw e; }
+  for (const cid of Object.keys(inv)) {
+    let iv = null; try { iv = (await CL.db.ref(`erp/${cid}/caInvites/${ek}`).once('value')).val(); } catch (e) { }
+    if (!iv) continue;
+    const at = Date.now(), cname = iv.company || 'Client';
+    const up = { [`caInvitesByEmail/${ek}/${cid}`]: null };
+    if (!mine[cid]) { up[`erp/${cid}/members/${u.uid}`] = { role: 'ca', email: String(u.email).toLowerCase(), name: name || String(u.email).split('@')[0] }; up[`erpCA/${u.uid}/${cid}`] = { name: cname, at }; mine[cid] = { name: cname, at }; }
+    await CL.db.ref().update(up);
+  }
+  lsS('erpCAList', mine); return mine;
+}
+function caSheet() {
+  sheet('Accountant / CA Login', `<div class="f"><label>Your Name (for a new account)</label><input id="ca_name" placeholder="e.g. CA Anil Mehta"></div>
+  <div class="f"><label>Email</label><input id="ca_email" type="email" autocomplete="username" placeholder="the email your client invited"></div>
+  <div class="f"><label>Password (at least 6 characters)</label><input id="ca_pw" type="password" autocomplete="current-password"></div>
+  <p class="mu" style="font-size:12.5px;margin:0">Use the email your client invited. All companies that invited you appear in one list, and each is kept separately on this phone.</p>
+  <div id="cl_err" class="rd" style="font-size:13px;margin-top:8px"></div>`, `<div class="btns"><button class="btn ghost" id="ca_new">Create Account</button><button class="btn" id="ca_go">Log In</button></div>`);
+  $('#ca_go').onclick = () => caAuth(false); $('#ca_new').onclick = () => caAuth(true);
+}
+async function caAuth(create) {
+  const name = $('#ca_name').value.trim(), email = $('#ca_email').value.trim().toLowerCase(), pw = $('#ca_pw').value;
+  if (!email || !pw) return clErr('Enter both email and password'); if (pw.length < 6) return clErr('Password must be at least 6 characters');
+  $$('#ca_go,#ca_new').forEach(b => b.disabled = true);
+  const fail = m => { $$('#ca_go,#ca_new').forEach(b => b.disabled = false); clErr(m); };
+  try { await loadFB(); CL.sdk = 'ok'; } catch (e) { return fail('No internet connection. Connect and try again.'); }
+  fbInit();
+  let cred; try { cred = create ? await CL.auth.createUserWithEmailAndPassword(email, pw) : await CL.auth.signInWithEmailAndPassword(email, pw); } catch (e) { return fail(authMsg(e)); }
+  let L; try { L = await caAccept(cred.user, name); } catch (e) { return fail(authMsg(e)); }
+  caSetAcct(cred.user, name);
+  closeOv(); toast(Object.keys(L).length ? 'Logged in as Accountant / CA ✓' : 'Logged in. No client has invited this email yet.'); go('clients');
+}
+function authReady() { return new Promise(res => { if (CL.auth.currentUser) return res(CL.auth.currentUser); let un = null; un = CL.auth.onAuthStateChanged(u => { if (un) un(); res(u); }); }); }
+function vClients() {
+  const f = $('#fab'); if (f) f.remove();
+  hdr('My Clients', { right: caAcct() ? `<button class="hbtn" id="caOut" style="font-size:13px;width:auto;padding:0 8px" onclick="caLogout()">Log out</button>` : '' });
+  $('#main').innerHTML = `<div class="card" id="clientsMsg" style="font-size:13px">Loading your clients...</div><div class="list" id="clientList"></div>`;
+  loadClients();
+}
+function drawClients(L, msg) {
+  const m = $('#clientsMsg'), el = $('#clientList'); if (!el) return;
+  const A = caAcct(), sy = lsJ('erpCAsync', {}), act = lsJ('erpActive', '') || (localStorage.getItem('erpActive') || ''), home = localStorage.getItem('erpHome');
+  const ago = t => { if (!t) return 'Not opened yet'; const d = new Date(t); return `Last synced ${fd(iso(d))} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`; };
+  m.innerHTML = msg || (A ? `Logged in as <b>${esc(A.email)}</b> (Accountant / CA). Tap a company to open it. Each company is kept separately.` : '');
+  const rows = Object.entries(L || {}).sort((a, b) => String(a[1].name).localeCompare(String(b[1].name))).map(([cid, x]) => `<div class="row cli" data-cid="${esc(cid)}" onclick="openCo('${esc(cid)}')"><div class="av">${esc(initials(x.name || 'C'))}</div><div class="m"><div class="t">${esc(x.name || 'Client')}</div><div class="s">${ago(sy[cid])}</div></div><div class="rt">${DB.name === 'erp-db-' + cid ? '<span class="tag g">Open now</span>' : '<span class="tag">Client</span>'}</div></div>`);
+  if (home) rows.unshift(`<div class="row" id="cli_own" onclick="openCo('')"><div class="av">🏠</div><div class="m"><div class="t">${esc(home)}</div><div class="s">My own business on this phone</div></div><div class="rt">${DB.name === 'erp-db' ? '<span class="tag g">Open now</span>' : ''}</div></div>`);
+  el.innerHTML = rows.length ? rows.join('') : emptyBox('👔', 'No clients yet', '<p class="mu">Ask your client to open Settings → Cloud / Login → “Invite your CA” and enter your email. Then come back here.</p>', `<button class="btn sec" onclick="loadClients()">Refresh</button>`);
+}
+async function loadClients() {
+  const A = caAcct();
+  if (!A) { drawClients({}, `You are not logged in as an Accountant / CA. <button class="btn sm" style="margin-top:8px" onclick="caSheet()">Accountant / CA Login</button>`); return; }
+  drawClients(caList());
+  try { await loadFB(); CL.sdk = 'ok'; } catch (e) { drawClients(caList(), 'Offline — showing the last known client list.'); return; }
+  fbInit(); const u = await authReady();
+  if (!u || u.uid !== A.uid) { drawClients(caList(), `Please log in again. <button class="btn sm" style="margin-top:8px" onclick="caSheet()">Log In</button>`); return; }
+  try { drawClients(await caAccept(u, A.name)); } catch (e) { drawClients(caList(), isDenied(e) ? 'Cloud rules are not published yet — the client list could not be loaded.' : 'Could not refresh the client list. Showing the last known list.'); }
+}
+async function openCo(cid) {
+  const A = caAcct(), L = caList();
+  clDetach(); CL.started = false; CL.attached = null; CL.connected = false; CL.denied = false; CL.cfg = null; CL.q = {}; CL.tombs = {};
+  try { if (DB.db) DB.db.close(); } catch (e) { }
+  DB.name = cid ? 'erp-db-' + cid : 'erp-db'; try { localStorage.setItem('erpActive', cid || ''); } catch (e) { }
+  await DB.open(); await loadAll(); await clBoot();
+  if (cid && !CL.cfg && A) { CL.cfg = { cid, uid: A.uid, email: A.email, name: A.name || '', role: 'ca', company: (L[cid] || {}).name || '', inited: false, uploadLocal: false }; await clSaveCfg(); clStart(); }
+  NAV.length = 0; history.replaceState(null, '', '#/home'); trackNav(); render();
+  if (cid) toast('Opened ' + ((L[cid] || {}).name || 'client'));
+}
+async function caRemoved(cid) {
+  clDetach(); CL.cfg = null; CL.q = {}; CL.tombs = {}; CL.started = false; CL.attached = null;
+  const L = caList(); delete L[cid]; lsS('erpCAList', L);
+  try { if (DB.db) DB.db.close(); } catch (e) { } try { indexedDB.deleteDatabase('erp-db-' + cid); } catch (e) { }
+  DB.name = 'erp-db'; try { localStorage.setItem('erpActive', ''); } catch (e) { }
+  await DB.open(); await loadAll(); await clBoot();
+  await ask('This client has removed your access as their CA. Their data has been removed from this phone.', { ok: 'OK', cancel: 'Close' });
+  NAV.length = 0; history.replaceState(null, '', '#/clients'); trackNav(); render();
+}
+async function caLogout() {
+  if (!(await ask('Log out as Accountant / CA? Client data saved on this phone will be removed. It stays safe in the cloud.', { ok: 'Logout' }))) return;
+  const L = caList();
+  clDetach(); try { if (CL.auth) await CL.auth.signOut(); } catch (e) { }
+  CL.cfg = null; CL.q = {}; CL.tombs = {}; CL.started = false; CL.attached = null; CL.user = null; CL.connected = false;
+  try { if (DB.db) DB.db.close(); } catch (e) { }
+  for (const cid of Object.keys(L)) { try { indexedDB.deleteDatabase('erp-db-' + cid); } catch (e) { } }
+  ['erpCA', 'erpCAList', 'erpCAsync'].forEach(k => lsS(k, null)); try { localStorage.setItem('erpActive', ''); } catch (e) { }
+  DB.name = 'erp-db'; await DB.open(); await loadAll(); await clBoot();
+  toast('Logged out'); NAV.length = 0; history.replaceState(null, '', '#/home'); trackNav(); render();
+}
+/* owner side */
+let CA_INV = {};
+async function caCardFill(m) {
+  const el = $('#caList'); if (!el) return;
+  try { CA_INV = (await CL.db.ref(`erp/${CL.cfg.cid}/caInvites`).once('value')).val() || {}; } catch (e) { CA_INV = {}; }
+  const cas = Object.entries(m || {}).filter(([, x]) => x.role === 'ca'), em = new Set(cas.map(([, x]) => String(x.email).toLowerCase()));
+  const rows = cas.map(([id, x]) => `<div class="row caRow" data-uid="${esc(id)}" style="cursor:default"><div class="av">👔</div><div class="m"><div class="t">${esc(x.name || x.email)}</div><div class="s">${esc(x.email)}</div></div><div class="rt"><span class="tag g">Accountant / CA</span><button class="btn dan sm" id="caRm_${esc(id)}" style="margin-top:4px" onclick="caRemove('${esc(id)}','${esc(emailKey(x.email))}')">Remove</button></div></div>`)
+    .concat(Object.entries(CA_INV).filter(([, x]) => !em.has(String(x.email).toLowerCase())).map(([ek, x]) => `<div class="row caInv" style="cursor:default"><div class="av">✉</div><div class="m"><div class="t">${esc(x.email)}</div><div class="s">Invited — waiting for the CA to log in</div></div><div class="rt"><button class="btn ghost sm" onclick="caRemove('','${esc(ek)}')">Cancel</button></div></div>`));
+  el.innerHTML = rows.length ? rows.join('') : '<div class="mu" style="font-size:13px">No CA added yet.</div>';
+}
+async function caInvite() {
+  if (!can('staff')) return denyToast();
+  const email = ($('#ca_inv').value || '').trim().toLowerCase();
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return toast('Enter a valid email');
+  if (!CL.db || !CL.user) return toast('Internet is needed to invite your CA');
+  if (email === String(CL.cfg.email).toLowerCase()) return toast('Enter your CA’s email, not your own');
+  const ek = emailKey(email), cid = CL.cfg.cid;
+  try {
+    await CL.db.ref().update({ [`erp/${cid}/caInvites/${ek}`]: { email, at: Date.now(), company: co().name || CL.cfg.company || 'Business' }, [`caInvitesByEmail/${ek}/${cid}`]: true, [`erp/${cid}/caLock`]: S.settings.caLock !== false });
+    toast('Invitation saved ✓ Ask your CA to log in with ' + email); $('#ca_inv').value = ''; loadStaff();
+  } catch (e) { if (isDenied(e)) { CL.denied = true; clStatus(); } toast(isDenied(e) ? 'Could not invite: cloud rules are not published yet.' : authMsg(e)); }
+}
+async function caRemove(id, ek) {
+  if (!can('staff')) return denyToast();
+  const x = id && STAFF && STAFF[id];
+  if (!(await ask(id ? `Remove ${esc((x && (x.name || x.email)) || 'your CA')}? Their access to your company stops immediately.` : 'Cancel this invitation?', { ok: id ? 'Remove' : 'Yes, cancel', danger: !!id }))) return;
+  const cid = CL.cfg.cid, up = { [`erp/${cid}/caInvites/${ek}`]: null, [`caInvitesByEmail/${ek}/${cid}`]: null };
+  if (id) { up[`erp/${cid}/members/${id}`] = null; up[`erpCA/${id}/${cid}`] = null; }
+  try { await CL.db.ref().update(up); toast(id ? 'CA removed' : 'Invitation cancelled'); loadStaff(); } catch (e) { toast(authMsg(e)); }
+}
+
 /* ---------- Settings card ---------- */
 function cloudCardHTML() {
   const s = clState();
   const rules = `<div id="rulesMsg" class="card" style="display:${s.k === 'rules' ? 'block' : 'none'};background:var(--warnl);border:1px solid #fcd34d;margin:10px 0 0;padding:10px;font-size:13px">⚠️ <b>Cloud rules are not published yet.</b> Your data is safe on this phone and the app works normally. The Owner should publish the rules in the Firebase console — sync will then start automatically.<div style="margin-top:8px"><button class="btn sm sec" onclick="clRetry()">Try Again</button></div></div>`;
   if (!CL.cfg) return `<div class="card" id="cloudCard"><div class="kv"><span>☁️ Cloud Sync</span><span class="tag x" id="cloudStatus" data-k="off">OFF</span></div>
   <p class="mu" style="font-size:12.5px;margin:6px 0 10px">Optional. Turn it on to back up data to the cloud, use it on several phones and give staff their own login. Without the cloud the app keeps working offline.</p>
-  <div class="btns"><button class="btn" id="clSignupBtn" onclick="cloudSheet('signup')">Create Company (Owner)</button><button class="btn ghost" id="clLoginBtn" onclick="cloudSheet('login')">Login (Owner / Staff)</button></div></div>`;
+  <div class="btns"><button class="btn" id="clSignupBtn" onclick="cloudSheet('signup')">Create Company (Owner)</button><button class="btn ghost" id="clLoginBtn" onclick="cloudSheet('login')">Login (Owner / Staff)</button></div>
+  <button class="btn ghost full" id="clCaBtn" style="margin-top:8px" onclick="caSheet()">👔 Accountant / CA Login</button>${caAcct() ? `<button class="btn sec full" id="clientsBtn" style="margin-top:8px" onclick="go('clients')">👥 My Clients</button>` : ''}</div>`;
   const c = CL.cfg;
   return `<div class="card" id="cloudCard"><div class="kv"><span>☁️ Status</span><span class="tag ${s.c}" id="cloudStatus" data-k="${s.k}">${esc(s.t)}</span></div>
   <div class="kv"><span>Company</span><b>${esc(co().name || c.company || '—')}</b></div>
@@ -3174,7 +3385,11 @@ function cloudCardHTML() {
   ${rules}
   <div class="btns" style="margin-top:10px"><button class="btn sec sm" onclick="clRetry()">🔄 Sync Now</button>${s.k === 'login' ? `<button class="btn sm" onclick="cloudSheet('login')">Log In</button>` : ''}<button class="btn ghost sm" id="clLogout" onclick="clLogout()">Logout</button></div></div>
   ${c.role === 'owner' ? `<div class="sect">Staff (Team)</div><div class="card"><div class="list" id="staffList" style="margin:0 0 10px"><div class="mu" style="font-size:13px">Loading...</div></div><button class="btn full" id="staffAddBtn" onclick="staffAdd()">+ Add Staff</button>
-  <p class="mu" style="font-size:12px;margin:8px 0 0">Roles: Manager = ${ROLE_INFO.manager}. Billing = ${ROLE_INFO.billing}. Viewer = ${ROLE_INFO.viewer}.</p></div>` : ''}`;
+  <p class="mu" style="font-size:12px;margin:8px 0 0">Roles: Manager = ${ROLE_INFO.manager}. Billing = ${ROLE_INFO.billing}. Viewer = ${ROLE_INFO.viewer}.</p></div>
+  <div class="sect">Your CA / Accountant</div><div class="card" id="caCard"><div class="list" id="caList" style="margin:0 0 10px"><div class="mu" style="font-size:13px">Loading...</div></div>
+  <div class="f"><label>CA email</label><input id="ca_inv" type="email" autocomplete="off" placeholder="ca@firm.in"></div><button class="btn full" id="caInvBtn" onclick="caInvite()">Invite your CA</button>
+  <p class="mu" style="font-size:12px;margin:8px 0 0">Your CA can see all entries and reports, export them and ask you questions. They cannot add, change or delete anything${S.settings.caLock !== false ? ' (they can lock periods and mark GST filed — change this under Period Lock)' : ''}. They log in with this email using “Accountant / CA Login”.</p></div>` : ''}
+  ${caAcct() ? `<div class="btns" style="margin-top:10px"><button class="btn sec full" id="clientsBtn" onclick="go('clients')">👥 My Clients</button></div>` : ''}`;
 }
 async function clBoot() {
   CL.cfg = (await DB.get('kv', 'cloud')) || null;
@@ -3187,7 +3402,7 @@ async function clBoot() {
 let HIDDEN_AT = 0;
 document.addEventListener('visibilitychange', () => { if (document.hidden) HIDDEN_AT = Date.now(); else if (S.settings && S.settings.pin && HIDDEN_AT && Date.now() - HIDDEN_AT > 120000 && !$('#lock').classList.contains('on')) lockScreen('unlock'); });
 (async function boot() {
-  try { await DB.open(); await loadAll(); await clBoot(); }
+  try { let ac = ''; try { ac = localStorage.getItem('erpActive') || ''; } catch (e) { } if (ac && caAcct()) DB.name = 'erp-db-' + ac; await DB.open(); await loadAll(); await clBoot(); }
   catch (e) { $('#main').innerHTML = emptyBox('⚠️', 'Storage could not be opened', 'If the browser is in private mode, open the app in normal mode.'); return; }
   if (!location.hash || location.hash === '#') history.replaceState(null, '', '#/home');
   trackNav();
