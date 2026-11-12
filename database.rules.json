@@ -112,7 +112,7 @@
         },
         "members": {
           "$uid": {
-            ".write": "auth != null && (root.child('erp/'+$cid+'/owner').val() == auth.uid || (!root.child('erp/'+$cid+'/owner').exists() && $uid == auth.uid && newData.parent().parent().child('owner').val() == auth.uid) || ($uid == auth.uid && !data.exists() && auth.token.email != null && newData.child('role').val() == 'ca' && newData.child('email').val() == auth.token.email.toLowerCase() && root.child('erp/'+$cid+'/caInvites/'+auth.token.email.toLowerCase().replace('.', ',')).exists()))",
+            ".write": "auth != null && (root.child('erp/'+$cid+'/owner').val() == auth.uid || (!root.child('erp/'+$cid+'/owner').exists() && $uid == auth.uid && newData.parent().parent().child('owner').val() == auth.uid) || ($uid == auth.uid && !data.exists() && auth.token.email_verified == true && auth.token.email != null && newData.child('role').val() == 'ca' && newData.child('email').val() == auth.token.email.toLowerCase() && root.child('erp/'+$cid+'/caInvites/'+auth.token.email.toLowerCase().replace('.', ',')).exists()))",
             ".validate": "newData.hasChildren(['role','email']) && newData.child('email').isString() && newData.child('role').isString() && newData.child('role').val().matches(/^(owner|manager|billing|viewer|ca)$/) && (newData.child('role').val() != 'owner' || $uid == newData.parent().parent().child('owner').val()) && ($uid != newData.parent().parent().child('owner').val() || newData.child('role').val() == 'owner')"
           }
         },
@@ -130,7 +130,7 @@
         },
         "caInvites": {
           "$ek": {
-            ".read": "auth != null && auth.token.email != null && auth.token.email.toLowerCase().replace('.', ',') == $ek",
+            ".read": "auth != null && auth.token.email_verified == true && auth.token.email != null && auth.token.email.toLowerCase().replace('.', ',') == $ek",
             ".write": "auth != null && root.child('erp/'+$cid+'/owner').val() == auth.uid",
             ".validate": "newData.hasChildren(['email','at']) && newData.child('email').isString() && newData.child('email').val().toLowerCase().replace('.', ',') == $ek && newData.child('at').isNumber() && (!newData.child('company').exists() || (newData.child('company').isString() && newData.child('company').val().length <= 100))"
           }
@@ -145,9 +145,9 @@
     },
     "caInvitesByEmail": {
       "$ek": {
-        ".read": "auth != null && auth.token.email != null && auth.token.email.toLowerCase().replace('.', ',') == $ek",
+        ".read": "auth != null && auth.token.email_verified == true && auth.token.email != null && auth.token.email.toLowerCase().replace('.', ',') == $ek",
         "$cid": {
-          ".write": "auth != null && (root.child('erp/'+$cid+'/owner').val() == auth.uid || (!newData.exists() && auth.token.email != null && auth.token.email.toLowerCase().replace('.', ',') == $ek))",
+          ".write": "auth != null && (root.child('erp/'+$cid+'/owner').val() == auth.uid || (!newData.exists() && auth.token.email_verified == true && auth.token.email != null && auth.token.email.toLowerCase().replace('.', ',') == $ek))",
           ".validate": "newData.val() == true"
         }
       }
@@ -156,7 +156,7 @@
       "$uid": {
         ".read": "auth != null && auth.uid == $uid",
         "$cid": {
-          ".write": "auth != null && ((auth.uid == $uid && newData.exists() && auth.token.email != null && root.child('erp/'+$cid+'/caInvites/'+auth.token.email.toLowerCase().replace('.', ',')).exists()) || (!newData.exists() && (auth.uid == $uid || root.child('erp/'+$cid+'/owner').val() == auth.uid)))",
+          ".write": "auth != null && ((auth.uid == $uid && newData.exists() && auth.token.email_verified == true && auth.token.email != null && root.child('erp/'+$cid+'/caInvites/'+auth.token.email.toLowerCase().replace('.', ',')).exists()) || (!newData.exists() && (auth.uid == $uid || root.child('erp/'+$cid+'/owner').val() == auth.uid)))",
           ".validate": "newData.hasChildren(['name','at']) && newData.child('name').isString() && newData.child('name').val().length <= 100 && newData.child('at').isNumber()"
         }
       }

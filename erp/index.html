@@ -3488,9 +3488,35 @@ async function caAuth(create) {
   try { await loadFB(); CL.sdk = 'ok'; } catch (e) { return fail('No internet connection. Connect and try again.'); }
   fbInit();
   let cred; try { cred = create ? await CL.auth.createUserWithEmailAndPassword(email, pw) : await CL.auth.signInWithEmailAndPassword(email, pw); } catch (e) { return fail(authMsg(e)); }
-  let L; try { L = await caAccept(cred.user, name); } catch (e) { return fail(authMsg(e)); }
-  caSetAcct(cred.user, name);
+  const u = cred.user;
+  if (create) { try { await u.sendEmailVerification(); } catch (e) { } }
+  if (!u.emailVerified) return caVerifySheet(u, name, create);
+  return caFinish(u, name, fail);
+}
+async function caFinish(u, name, fail) {
+  let L; try { L = await caAccept(u, name); } catch (e) { return fail(authMsg(e)); }
+  caSetAcct(u, name);
   closeOv(); toast(Object.keys(L).length ? 'Logged in as Accountant / CA ✓' : 'Logged in. No client has invited this email yet.'); go('clients');
+}
+/* CA email verification: client invites are only accepted for a verified email (Firebase rules check auth.token.email_verified). */
+function caVerifySheet(u, name, sent) {
+  const em = esc(String(u.email || '').toLowerCase());
+  sheet('Verify your email', `<p id="ca_vmsg" style="margin:0 0 6px">${sent ? `We sent a verification link to <b>${em}</b>. Open it, then tap I've verified.` : `Your email <b>${em}</b> is not verified yet. Tap Resend to get a verification link, open it, then tap I've verified.`}</p>
+  <p class="mu" style="font-size:12.5px;margin:0">Check your spam folder if you can't find it. Your clients' companies open only after the email is verified.</p>
+  <div id="cl_err" class="rd" style="font-size:13px;margin-top:8px"></div>`, `<div class="btns"><button class="btn ghost" id="ca_vresend">Resend</button><button class="btn" id="ca_vok">I've verified</button></div>`);
+  const bs = () => $$('#ca_vresend,#ca_vok'), fail = m => { bs().forEach(b => b.disabled = false); clErr(m); };
+  $('#ca_vresend').onclick = async () => {
+    bs().forEach(b => b.disabled = true);
+    try { await u.sendEmailVerification(); bs().forEach(b => b.disabled = false); clErr(''); $('#ca_vmsg').innerHTML = `We sent a new verification link to <b>${em}</b>. Open it, then tap I've verified.`; toast('Verification link sent ✓'); } catch (e) { fail(authMsg(e)); }
+  };
+  $('#ca_vok').onclick = async () => {
+    bs().forEach(b => b.disabled = true);
+    try { await u.reload(); } catch (e) { return fail(authMsg(e)); }
+    const cu = (CL.auth && CL.auth.currentUser && CL.auth.currentUser.uid === u.uid) ? CL.auth.currentUser : u;
+    if (!cu.emailVerified) return fail(`Your email is not verified yet. Open the link we sent to ${em}, then tap I've verified.`);
+    try { await cu.getIdToken(true); } catch (e) { return fail(authMsg(e)); }
+    return caFinish(cu, name, fail);
+  };
 }
 function authReady() { return new Promise(res => { if (CL.auth.currentUser) return res(CL.auth.currentUser); let un = null; un = CL.auth.onAuthStateChanged(u => { if (un) un(); res(u); }); }); }
 function vClients() {
@@ -3515,6 +3541,8 @@ async function loadClients() {
   try { await loadFB(); CL.sdk = 'ok'; } catch (e) { drawClients(caList(), 'Offline — showing the last known client list.'); return; }
   fbInit(); const u = await authReady();
   if (!u || u.uid !== A.uid) { drawClients(caList(), `Please log in again. <button class="btn sm" style="margin-top:8px" onclick="caSheet()">Log In</button>`); return; }
+  if (!u.emailVerified) { try { await u.reload(); } catch (e) { } }
+  if (!u.emailVerified) { drawClients(caList(), `Your email is not verified yet, so new client invites can't be loaded. <button class="btn sm" id="caVerBtn" style="margin-top:8px">Verify Email</button>`); const vb = $('#caVerBtn'); if (vb) vb.onclick = () => caVerifySheet(CL.auth.currentUser || u, A.name, false); return; }
   try { drawClients(await caAccept(u, A.name)); } catch (e) { drawClients(caList(), isDenied(e) ? 'Cloud rules are not published yet — the client list could not be loaded.' : 'Could not refresh the client list. Showing the last known list.'); }
 }
 async function openCo(cid) {
