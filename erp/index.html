@@ -2354,7 +2354,7 @@ function setPreset(p) {
 }
 function setMonth(m) { if (!m) return; RANGE.touched = true; RANGE.from = m + '-01'; RANGE.to = monthEnd(RANGE.from); RANGE.p = 'custom'; render(); }
 const ALL_REPORTS = [
-  ['compliance', '🗓', 'Compliance (CA pack)', 'Due dates, MSME 45-day, cash limits, ITC 180-day', 'all'],
+  ['compliance', '🗓', 'Compliance (CA pack)', 'Due dates, MSME 45-day, cash limits, ITC 180-day, tax audit, partners, TDS on purchase, bank stock statement', 'all'],
   ['sales', '🧾', 'Sales Register', 'All sales invoices', 'all'],
   ['purchase', '🛒', 'Purchase Register', 'All purchase bills', 'all'],
   ['gstr1', '📤', 'GSTR-1', 'B2B, B2CL, B2CS, CDNR, CDNUR, HSN, Docs + JSON', 'regular'],
@@ -3503,7 +3503,7 @@ let CMP_TAB = 'cal', CMP_MONTH = '';
 function vCompliance(q = {}) {
   if (q.t) CMP_TAB = q.t;
   hdr('Compliance', { back: true });
-  const tabs = [['cal', 'Due dates'], ['msme', 'MSME 45-day'], ['cash', 'Cash limits'], ['itc', 'ITC 180-day']];
+  const tabs = [['cal', 'Due dates'], ['msme', 'MSME 45-day'], ['cash', 'Cash limits'], ['itc', 'ITC 180-day'], ['audit', 'Tax audit'], ['firm', 'Partners'], ['q194', 'TDS on purchase'], ['dp', 'Stock statement']];
   const R = COMPLIANCE_RULES, t = today();
   let body = '';
   if (CMP_TAB === 'cal') {
@@ -3524,6 +3524,8 @@ function vCompliance(q = {}) {
     const fs = fyStart(t), I = cmpCashIssues(fs, t);
     body = `<div class="card" style="font-size:13px"><div>• ${esc(R.cashExp.what)} <span class="mu">(${esc(R.cashExp.sec)})</span></div><div>• ${esc(R.cashRcpt.what)} <span class="mu">(${esc(R.cashRcpt.sec)})</span></div><div>• ${esc(R.cashLoan.what)} <span class="mu">(${esc(R.cashLoan.secIn)}, ${esc(R.cashLoan.secOut)})</span></div></div>
     <div class="sect">This financial year (from ${fd(fs)})</div><div class="list" id="cashList">${I.length ? I.map(i => `<div class="row" onclick="go('v/${i.vids[0]}')"><div class="av">⚠️</div><div class="m"><div class="t">${esc(i.name)} · ${fd(i.date)}</div><div class="s">${esc(i.msg)}</div><div class="s" style="font-size:11px">${esc(i.nos.join(', '))}</div></div><div class="rt"><div class="a">${inr(i.total)}</div></div></div>`).join('') : emptyBox('✅', 'No cash-limit issues found')}</div>`;
+  } else if (['audit', 'firm', 'q194', 'dp'].includes(CMP_TAB)) {
+    body = ca2Body(CMP_TAB);
   } else {
     const I = cmpItc180(t);
     body = `<div class="card" style="font-size:13px">${esc(R.itc180.what)}<div class="mu" style="font-size:11.5px;margin-top:4px">${esc(R.itc180.sec)}. Interest shown is a rough upper estimate at ${R.itc180.rate}% a year from the bill date (due only if the credit was used).</div></div>
@@ -3537,15 +3539,321 @@ function vCompliance(q = {}) {
     <div class="kv"><span>Cash loan / deposit</span><span>${inr(R.cashLoan.limit)} or more</span></div>
     <div class="kv"><span>GST credit</span><span>${R.itc180.days} days to pay supplier</span></div>
     ${R.due.map(r => `<div class="kv"><span>${esc(r.name)}</span><a href="${esc(r.src)}" target="_blank" rel="noopener" style="font-size:11.5px">${esc(r.sec)}</a></div>`).join('')}
+    <div class="kv"><span>Tax audit</span><a href="${esc(CA2_RULES.audit.src)}" target="_blank" rel="noopener" style="font-size:11.5px">${esc(CA2_RULES.audit.sec)}: ₹1 Cr / ₹10 Cr (cash ≤ 5%) / ₹50 L profession</a></div>
+    <div class="kv"><span>Partner pay & interest</span><a href="${esc(CA2_RULES.partner.src)}" target="_blank" rel="noopener" style="font-size:11.5px">${esc(CA2_RULES.partner.sec)}: first ₹6 L → ₹3 L or 90%, balance 60%; interest 12%</a></div>
+    <div class="kv"><span>TDS on purchase of goods</span><a href="${esc(CA2_RULES.q194.src)}" target="_blank" rel="noopener" style="font-size:11.5px">${esc(CA2_RULES.q194.sec)}: 0.1% above ₹50 L, buyer turnover above ₹10 Cr</a></div>
+    <div class="kv"><span>TCS on sale of goods</span><a href="${esc(CA2_RULES.tcs1h.src)}" target="_blank" rel="noopener" style="font-size:11.5px">${esc(CA2_RULES.tcs1h.sec)}: withdrawn from 1 Apr 2025</a></div>
     <p class="mu" style="font-size:11.5px">Income-tax sections are from the Income-tax Act 2025 (from 1 Apr 2026), old 1961 numbers in brackets. Due dates can be extended by government notification — check the GST / income-tax portal.</p></div></details>`;
   $('#main').innerHTML = `<div class="card" id="cmpEst" style="font-size:12.5px;border-left:4px solid #f59e0b">Estimate — confirm with your CA. Rules as of ${fd(COMP_ASOF)}.</div>
-  <div class="seg" id="cmpTabs" style="margin-bottom:10px">${tabs.map(([k, l]) => `<button type="button" data-v="${k}" class="${CMP_TAB === k ? 'on' : ''}" onclick="segPick(this)">${l}</button>`).join('')}</div>${body}${rulesCard}`;
+  <div class="seg wrap" id="cmpTabs" style="margin-bottom:10px">${tabs.map(([k, l]) => `<button type="button" data-v="${k}" class="${CMP_TAB === k ? 'on' : ''}" style="font-size:12.5px;min-height:36px" onclick="segPick(this)">${l}</button>`).join('')}</div>${body}${rulesCard}`;
   $('#cmpTabs').onseg = k => { CMP_TAB = k; vCompliance(); };
   $$('.cmpDone').forEach(el => { el.onchange = async () => { await cmpToggleDone(el.dataset.k, el.checked); toast(el.checked ? 'Marked done ✓' : 'Marked not done'); vCompliance(); }; });
   const mi = $('#cmpMonth'); if (mi) mi.onchange = () => { if (/^\d{4}-\d\d$/.test(mi.value)) { CMP_MONTH = mi.value; vCompliance(); } };
   const setC = (id, k) => { const el = $('#' + id); if (el) el.onchange = async () => { S.settings.comp = { ...(S.settings.comp || {}), [k]: el.checked }; await saveSettings(); vCompliance(); }; };
   setC('cmpQrmp', 'qrmp'); setC('cmpTds', 'tds'); setC('cmpAudit', 'audit');
+  ca2Bind();
 }
+/* ================= CA pack 2 (I2): tax audit + 3CD helper, partner limits, 194Q, CC/OD stock statement ================= */
+/* Editable rule table — checked 12 Nov 2026 against the sources shown. Income-tax Act 2025 numbers, old 1961 Act numbers in brackets.
+   Estimate — confirm with your CA. */
+const CA2_RULES = {
+  audit: { bizLimit: 10000000, bizLimitLowCash: 100000000, cashPct: 5, profLimit: 5000000, sec: 'Sec 63 (old 44AB)', what: 'Business: tax audit if turnover is above ₹1 crore — ₹10 crore when cash receipts and cash payments are each 5% or less. Profession: gross receipts above ₹50 lakh.', src: 'https://www.incometaxindia.gov.in/documents/81799/11848482/Updated-FQAs-on-Interplay%26Transitions.pdf/e10ad2b6-9495-de90-58d3-20606d8954ae?t=1775128640970', src2: 'https://www.incometaxindia.gov.in/w/section-63-134' },
+  partner: { slab: 600000, min: 300000, pct1: 90, pct2: 60, intMax: 12, sec: 'Sec 35(e) (old 40(b))', what: 'Working-partner remuneration allowed: on the first ₹6,00,000 of book profit (or a loss) — ₹3,00,000 or 90% of book profit, whichever is higher; on the balance — 60%. Interest to partners up to 12% simple a year. Both must be allowed by the partnership deed.', src: 'https://www.incometaxindia.gov.in/w/section-35-181' },
+  q194: { buyerTurnover: 100000000, limit: 5000000, rate: 0.1, noPanRate: 5, sec: 'Sec 393(1) Table Sl. 8(ii) (old 194Q)', what: 'If your turnover last year was above ₹10 crore, deduct TDS of 0.1% on purchases of goods from a resident seller above ₹50 lakh in the year (only on the amount above ₹50 lakh; 5% if the seller has no PAN).', src: 'https://www.incometaxindia.gov.in/w/section-393-6', src2: 'https://indiankanoon.org/doc/78786565/' },
+  tcs1h: { sec: 'Old 206C(1H) — TCS on sale of goods', what: 'Withdrawn from 1 April 2025. Sellers no longer collect 0.1% TCS on sales above ₹50 lakh; only the buyer\'s TDS (above) remains.', src: 'https://www.incometaxindia.gov.in/documents/20117/14614782/%E2%80%8BKey-Highlights-of-Finance-Act-2025.pdf/139e2679-ed0a-9470-7277-23d5d6244b9f' },
+  dp: { stockMargin: 25, debtMargin: 40, debtDays: 90, what: 'Drawing power = (stock − creditors) × (1 − stock margin) + debtors up to 90 days × (1 − debtor margin). Your bank\'s sanction letter decides the margins.' }
+};
+const CA2_ASOF = '2026-11-12';
+let CA2_FY = 0, CA2_DPM = '';
+const ca2Fy = () => CA2_FY || +fyStart().slice(0, 4);
+const ca2Range = y => [`${y}-04-01`, `${y + 1}-03-31`];
+const ca2Comp = () => S.settings.comp || {};
+const ca2Pct = (a, b) => b ? r2(a * 100 / b) : 0;
+
+/* ---- money in / out split cash vs bank (contra and money-only entries left out) ---- */
+function ca2MoneyFlow(from, to) {
+  const o = { cashR: 0, bankR: 0, cashP: 0, bankP: 0 };
+  for (const v of S.vouchers) {
+    if (v.date < from || v.date > to || v.type === 'contra') continue;
+    const P = postings(v); if (!P.length || P.every(e => isMoney(e.a))) continue;
+    for (const e of P) { if (!isMoney(e.a)) continue; const c = isCashAcc(e.a); if (e.dr) o[c ? 'cashR' : 'bankR'] += e.dr; if (e.cr) o[c ? 'cashP' : 'bankP'] += e.cr; }
+  }
+  for (const k in o) o[k] = r2(o[k]);
+  o.totR = r2(o.cashR + o.bankR); o.totP = r2(o.cashP + o.bankP);
+  o.rPct = ca2Pct(o.cashR, o.totR); o.pPct = ca2Pct(o.cashP, o.totP);
+  return o;
+}
+/* ---- 1. tax audit applicability ---- */
+function ca2Audit(y = ca2Fy(), prof = !!ca2Comp().prof) {
+  const [fs, fe] = ca2Range(y), R = CA2_RULES.audit, P = plCalc(fs, fe), F = ca2MoneyFlow(fs, fe);
+  const turnover = r2(P.netSales + P.dirIncT);
+  let applies, reason;
+  if (prof) { applies = turnover > R.profLimit; reason = applies ? `Gross receipts ${inr(turnover)} are above ${inr(R.profLimit)} (profession).` : `Gross receipts ${inr(turnover)} are within ${inr(R.profLimit)} (profession).`; }
+  else if (turnover <= R.bizLimit) { applies = false; reason = `Turnover ${inr(turnover)} is within ${inr(R.bizLimit)}.`; }
+  else if (turnover > R.bizLimitLowCash) { applies = true; reason = `Turnover ${inr(turnover)} is above ${inr(R.bizLimitLowCash)}.`; }
+  else {
+    const low = F.rPct <= R.cashPct && F.pPct <= R.cashPct;
+    applies = !low;
+    reason = low ? `Turnover ${inr(turnover)} is between ₹1 crore and ₹10 crore, and cash receipts (${F.rPct}%) and cash payments (${F.pPct}%) are both ${R.cashPct}% or less — limit is ₹10 crore.` : `Turnover ${inr(turnover)} is above ₹1 crore and cash ${F.rPct > R.cashPct ? `receipts are ${F.rPct}%` : `payments are ${F.pPct}%`} (more than ${R.cashPct}%), so the ₹10 crore limit does not apply.`;
+  }
+  const PR = RATES.pres;
+  const presNote = prof
+    ? `Presumptive scheme (Sec ${PR.sec}): professionals with receipts up to ${inr(PR.profLimit)} (${inr(PR.profLimitDigital)} if cash is ${PR.cashMaxPct}% or less) can declare ${PR.profRate}% as income without audit. Declaring less while income is above the basic exemption needs an audit.`
+    : `Presumptive scheme (Sec ${PR.sec}): turnover up to ${inr(PR.bizLimit)} (${inr(PR.bizLimitDigital)} if cash receipts are ${PR.cashMaxPct}% or less) can declare ${PR.digitalRate}% (bank / UPI) / ${PR.cashRate}% (cash) as profit without audit. Declaring lower profit while income is above the basic exemption needs an audit even below ₹1 crore; leaving the scheme bars it for 5 years.`;
+  return { y, fs, fe, prof, turnover, gp: P.gp, np: P.np, ...F, applies, reason, presNote };
+}
+/* quantitative stock summary for the year */
+function ca2StockQty(fs, fe) {
+  const rows = [];
+  for (const it of S.items) {
+    if (it.type === 'service') continue;
+    const r = { id: it.id, name: it.name, unit: it.unit || '', open: r2(stockAsOf(it.id, addDays(fs, -1))), pur: 0, sale: 0, prodIn: 0, used: 0, other: 0 };
+    for (const v of S.vouchers) {
+      if (v.date < fs || v.date > fe) continue; const t = VT[v.type]; if (!t) continue;
+      if (t.lines && t.stock) for (const l of v.lines || []) { if (l.itemId !== it.id) continue; const q = t.stock * num(l.qty); if (v.type === 'purchase' || v.type === 'pret') r.pur += q; else if (v.type === 'sale' || v.type === 'sret') r.sale -= q; else r.other += q; }
+      if (v.type === 'prod') { if (v.outItem === it.id) r.prodIn += num(v.outQty); for (const l of v.lines || []) if (l.itemId === it.id) r.used += num(l.qty); }
+    }
+    ['pur', 'sale', 'prodIn', 'used', 'other'].forEach(k => { r[k] = r2(r[k]); });
+    r.close = r2(stockAsOf(it.id, fe));
+    if (r.open || r.pur || r.sale || r.prodIn || r.used || r.other || r.close) rows.push(r);
+  }
+  return rows.sort((a, b) => a.name.localeCompare(b.name));
+}
+/* Form 3CD key-clause data from the books */
+function ca2Form3cd(y = ca2Fy()) {
+  const A = ca2Audit(y), { fs, fe } = A, C = (h, n) => ({ h, n: n ? 1 : 0 });
+  const vs = S.vouchers.filter(v => v.date >= fs && v.date <= fe);
+  const cash = cmpCashIssues(fs, fe);
+  const cashExp = cash.filter(i => i.rule === 'exp'), loans = cash.filter(i => i.rule === 'loanIn' || i.rule === 'loanOut');
+  const asOf = fe < today() ? fe : today();
+  const msme = cmpMsme(asOf).rows.filter(r => r.overdue);
+  const T = tdsReport(vs), tdsRows = T.sections[0].rows;
+  const tdsBal = (() => { const b = accTotals(fe).get('tds_pay') || 0; return r2(-b); })();
+  const g = gstOutDocs(vs), gt = r2(g.reduce((s, v) => s + sgnOf(v) * num(v.taxable), 0)), gx = r2(g.reduce((s, v) => s + sgnOf(v) * (num(v.cgst) + num(v.sgst) + num(v.igst) + num(v.cess)), 0));
+  const Q = ca2StockQty(fs, fe);
+  const L = accList(), TT = accTotals(fe);
+  const fixed = L.filter(l => l.group === 'fixed').map(l => [l.name, r2(TT.get(l.id) || 0), 'Fill from fixed asset register (Income-tax WDV rates)']);
+  return {
+    title: `Tax audit helper (Form 3CD data) — FY ${y}-${String((y + 1) % 100).padStart(2, '0')}`, A,
+    cards: [['Turnover', inr(A.turnover)], ['Gross profit', `${inr(A.gp)} (${ca2Pct(A.gp, A.turnover)}%)`], ['Net profit', `${inr(A.np)} (${ca2Pct(A.np, A.turnover)}%)`], ['Tax audit', A.applies ? 'Likely needed' : 'Likely not needed']],
+    sections: [
+      { title: 'Turnover and profit ratios (clause 40)', key: 'c40', cols: [C('Detail'), C('Amount / %', 1)], rows: [['Turnover / gross receipts', A.turnover], ['Gross profit', A.gp], ['Gross profit % of turnover', ca2Pct(A.gp, A.turnover)], ['Net profit', A.np], ['Net profit % of turnover', ca2Pct(A.np, A.turnover)], ['Cash receipts % of all receipts', A.rPct], ['Cash payments % of all payments', A.pPct]] },
+      { title: 'Cash payments above the daily limit (clause 21(d))', key: 'c21', cols: [C('Date'), C('Paid to'), C('Entries'), C('Amount', 1)], rows: cashExp.map(i => [fd(i.date), i.name, i.nos.join(' '), i.total]) },
+      { title: 'MSME bills paid late / unpaid past the limit (clause 22)', key: 'c22', cols: [C('Supplier'), C('Udyam no.'), C('Bill'), C('Bill date'), C('Days'), C('Unpaid', 1)], rows: msme.map(r => [r.name, r.udyam, r.no, fd(r.date), r.days, r.unpaid]) },
+      { title: 'Loans / deposits of ₹20,000 or more in cash (clause 31)', key: 'c31', cols: [C('Date'), C('Party'), C('Taken / repaid'), C('Amount', 1)], rows: loans.map(i => [fd(i.date), i.name, i.rule === 'loanIn' ? 'Taken' : 'Repaid', i.total]) },
+      { title: 'TDS deducted (clause 34)', key: 'c34', cols: [C('Section'), C('Entries', 1), C('Amount paid', 1), C('TDS', 1)], rows: tdsRows.concat([['TDS payable balance in books on ' + fd(fe), '', '', tdsBal]]) },
+      { title: 'GST registration and turnover (clause 44 / 4)', key: 'c44', cols: [C('GSTIN'), C('State'), C('Taxable sales', 1), C('Output GST', 1)], rows: isGstCo() ? [[co().gstin || 'Not entered', stateName(co().state), gt, gx]] : [['Not registered', '', 0, 0]] },
+      { title: 'Quantity details of stock (clause 35)', key: 'c35', cols: [C('Item'), C('Unit'), C('Opening', 1), C('Purchased', 1), C('Made', 1), C('Used in making', 1), C('Sold', 1), C('Closing', 1)], rows: Q.map(r => [r.name, r.unit, r.open, r.pur, r.prodIn, r.used, r.sale, r.close]) },
+      { title: 'Depreciation (clause 18) — to fill', key: 'c18', cols: [C('Fixed asset ledger'), C('Book balance', 1), C('Note')], rows: fixed.length ? fixed : [['No fixed asset ledgers', 0, 'Add assets under Fixed Assets in Accounts']] }
+    ],
+    note: 'Estimate — confirm with your CA. Figures are from your books; the CA checks them before filing the audit report.'
+  };
+}
+function ca2CSV(R) {
+  const out = [[R.title], [co().name || ''], []];
+  if (R.cards) R.cards.forEach(c => out.push(c)); out.push([]);
+  R.sections.forEach(s => { out.push([s.title]); out.push(s.cols.map(c => c.h)); s.rows.forEach(r => out.push(r)); if (!s.rows.length) out.push(['None']); out.push([]); });
+  out.push([R.note || 'Estimate — confirm with your CA.']);
+  return toCSV(out);
+}
+function ca2Print(R) {
+  $('#print').innerHTML = `<div class="pg" style="font-family:sans-serif"><h2 style="margin:0 0 4px">${esc(R.title)}</h2><div style="font-size:12px;margin-bottom:6px">${esc(co().name || '')}${co().gstin ? ' · GSTIN ' + esc(co().gstin) : ''}</div>${repSecHTML({ ...R, sections: R.sections.map(s => ({ ...s, rows: s.rows.length ? s.rows : [] })) })}<p style="font-size:11px">${esc(R.note || 'Estimate — confirm with your CA.')}</p></div>`;
+  setTimeout(() => window.print(), 50);
+}
+
+/* ---- 2. partnership firm / LLP ---- */
+const CA2_BIZ = [['prop', 'Proprietor'], ['firm', 'Partnership'], ['llp', 'LLP'], ['company', 'Company']];
+const ca2FirmCfg = () => ({ type: 'prop', partners: [], intRate: 12, remLeds: null, intLeds: null, ...(S.settings.firm || {}) });
+const ca2ExpLeds = () => accList().filter(l => !l.party && ['indexp', 'direxp'].includes(l.group));
+function ca2Tagged(kind) {
+  const c = ca2FirmCfg(), k = kind === 'rem' ? 'remLeds' : 'intLeds';
+  if (Array.isArray(c[k])) return c[k];
+  const re = kind === 'rem' ? /partner.*(remun|salary)|(remun|salary).*partner/i : /partner.*interest|interest.*partner/i;
+  return ca2ExpLeds().filter(l => re.test(l.name)).map(l => l.id);
+}
+function ca2MaxRem(bp) {
+  const R = CA2_RULES.partner;
+  const first = Math.max(R.min, bp > 0 ? Math.min(bp, R.slab) * R.pct1 / 100 : 0);
+  return r2(first + Math.max(0, bp - R.slab) * R.pct2 / 100);
+}
+function ca2Firm(y = ca2Fy()) {
+  const c = ca2FirmCfg(), R = CA2_RULES.partner, [fs, fe] = ca2Range(y);
+  const on = c.type === 'firm' || c.type === 'llp';
+  const M = periodMove(fs, fe), T0 = accTotals(addDays(fs, -1)), L = accList();
+  const sumL = ids => r2(ids.reduce((s, id) => s + (M.get(id) || 0), 0));
+  const rate = Math.min(num(c.intRate) || 0, R.intMax);
+  const partners = (c.partners || []).map(p => { const cap = p.capAcc ? r2(-(T0.get(p.capAcc) || 0)) : 0; return { ...p, capName: p.capAcc ? accById(p.capAcc, L).name : '—', capital: cap, intAllowed: r2(Math.max(0, cap) * rate / 100), intMax: r2(Math.max(0, cap) * R.intMax / 100) }; });
+  const actRem = sumL(ca2Tagged('rem')), actInt = sumL(ca2Tagged('int'));
+  const intMaxT = r2(partners.reduce((s, p) => s + p.intMax, 0));
+  const intExcess = r2(Math.max(0, actInt - intMaxT));
+  const np = plCalc(fs, fe).np;
+  const bookProfit = r2(np + actRem + intExcess);
+  const working = partners.filter(p => p.working).length;
+  const maxRem = working ? ca2MaxRem(bookProfit) : 0;
+  const remExcess = r2(Math.max(0, actRem - maxRem));
+  return { on, type: c.type, y, fs, fe, rate, partners, intAllowedT: r2(partners.reduce((s, p) => s + p.intAllowed, 0)), intMaxT, actInt, intExcess, actRem, np, bookProfit, working, maxRem, remExcess, disallowed: r2(remExcess + intExcess) };
+}
+async function ca2SaveFirm(patch) { S.settings.firm = { ...ca2FirmCfg(), ...patch }; await saveSettings(); }
+function ca2PartnerSheet(id) {
+  const c = ca2FirmCfg(), p = (c.partners || []).find(x => x.id === id) || { id: '', name: '', pan: '', capAcc: '', working: true };
+  const caps = accList().filter(l => l.group === 'capital' && l.id !== 'drawings');
+  sheet(id ? 'Edit partner' : 'Add partner', `<div class="f"><label>Name *</label><input id="pt_name" value="${esc(p.name)}"></div>
+  <div class="f"><label>PAN</label><input id="pt_pan" maxlength="10" style="text-transform:uppercase" value="${esc(p.pan || '')}"></div>
+  <div class="f"><label>Capital ledger</label><select id="pt_cap"><option value="">-- New: "Name Capital" --</option>${caps.map(l => `<option value="${esc(l.id)}" ${l.id === p.capAcc ? 'selected' : ''}>${esc(l.name)}</option>`).join('')}</select></div>
+  <label class="ck"><input type="checkbox" id="pt_work" ${p.working ? 'checked' : ''}> <span>Working partner (actively runs the business)</span></label>`,
+  `<div class="btns">${id ? '<button class="btn ghost" id="pt_del">Remove</button>' : ''}<button class="btn full" id="pt_save">Save</button></div>`);
+  $('#pt_save').onclick = async () => {
+    const name = $('#pt_name').value.trim(), pan = $('#pt_pan').value.trim().toUpperCase(); if (!name) return toast('Enter the partner name');
+    if (pan && !/^[A-Z]{5}\d{4}[A-Z]$/.test(pan)) return toast('PAN should look like ABCDE1234F');
+    let capAcc = $('#pt_cap').value;
+    if (!capAcc) { const nm = name + ' Capital', ex = accList().find(l => l.name.toLowerCase() === nm.toLowerCase()); if (ex) capAcc = ex.id; else { const r = await saveLedger(nm, 'capital', 0); if (r !== true) return toast(r); capAcc = S.settings.ledgers[S.settings.ledgers.length - 1].id; } }
+    const rec = { id: p.id || uid(), name, pan, capAcc, working: $('#pt_work').checked };
+    const list = (ca2FirmCfg().partners || []).filter(x => x.id !== rec.id).concat([rec]);
+    await ca2SaveFirm({ partners: list }); closeOv(); toast('Partner saved ✓'); vCompliance();
+  };
+  const d = $('#pt_del'); if (d) d.onclick = async () => { await ca2SaveFirm({ partners: (ca2FirmCfg().partners || []).filter(x => x.id !== id) }); closeOv(); toast('Partner removed'); vCompliance(); };
+}
+
+/* ---- 3. TDS on purchase of goods (old 194Q) ---- */
+function ca2Q194(y = ca2Fy()) {
+  const R = CA2_RULES.q194, [fs, fe] = ca2Range(y), on = !!ca2Comp().q194;
+  const m = new Map();
+  const vs = S.vouchers.filter(v => v.date >= fs && v.date <= fe && v.partyId && (v.type === 'purchase' || v.type === 'pret')).sort((a, b) => a.date.localeCompare(b.date) || (a.createdAt || 0) - (b.createdAt || 0));
+  for (const v of vs) {
+    const p = party(v.partyId); const r = m.get(v.partyId) || { pid: v.partyId, name: p ? p.name : '', pan: p ? p.pan || '' : '', total: 0, crossed: '', deducted: 0 };
+    r.total = r2(r.total + (v.type === 'pret' ? -1 : 1) * num(v.taxable));
+    if (!r.crossed && r.total > R.limit) r.crossed = v.date;
+    if (v.type === 'purchase' && num(v.tds) > 0 && /194Q|8\(ii\)/i.test(tdsSecOf(v))) r.deducted = r2(r.deducted + num(v.tds));
+    m.set(v.partyId, r);
+  }
+  const rows = [...m.values()].map(r => { const excess = r2(Math.max(0, r.total - R.limit)), rate = r.pan ? R.rate : R.noPanRate, tds = r2(excess * rate / 100); return { ...r, flag: excess > 0, excess, rate, tds, short: r2(Math.max(0, tds - r.deducted)), near: !excess && r.total >= R.limit * 0.8 }; }).sort((a, b) => b.total - a.total);
+  let lastTurn = 0; try { const P = plCalc(`${y - 1}-04-01`, `${y}-03-31`); lastTurn = r2(P.netSales + P.dirIncT); } catch (e) { }
+  const fl = rows.filter(r => r.flag);
+  return { on, y, rows, flagged: fl, lastTurn, tds: r2(fl.reduce((s, r) => s + r.tds, 0)), short: r2(fl.reduce((s, r) => s + r.short, 0)) };
+}
+
+/* ---- 4. CC / OD stock statement + drawing power ---- */
+const ca2DpCfg = () => ({ sm: CA2_RULES.dp.stockMargin, dm: CA2_RULES.dp.debtMargin, limit: 0, odAcc: '', bank: '', ...(S.settings.dp || {}) });
+const ca2OdAccs = () => accList().filter(l => !l.party && (l.group === 'bankg' || l.group === 'loans'));
+function ca2Debtors(asOf) {
+  const D = CA2_RULES.dp.debtDays, rows = [];
+  for (const p of S.parties) {
+    let b = 0; try { const lr = ledgerRows(p.id, asOf); b = lr[lr.length - 1].bal; } catch (e) { continue; }
+    if (b <= 0.004) continue;
+    let rem = r2(b), young = 0;
+    const bills = S.vouchers.filter(v => v.partyId === p.id && (v.type === 'sale' || v.type === 'dn') && v.date <= asOf).sort((a, c) => c.date.localeCompare(a.date) || (c.createdAt || 0) - (a.createdAt || 0));
+    for (const v of bills) { if (rem <= 0.004) break; const due = v.type === 'dn' ? num(v.total) : r2(num(v.total) - num(v.paid) - num(v.tds)); if (due <= 0.004) continue; const u = Math.min(due, rem); if (cmpDays(v.date, asOf) <= D) young += u; rem = r2(rem - u); }
+    young = r2(young); rows.push({ name: p.name, total: r2(b), young, old: r2(b - young) });
+  }
+  return rows.sort((a, c) => c.total - a.total);
+}
+function ca2Creditors(asOf) {
+  const rows = [];
+  for (const p of S.parties) { let b = 0; try { const lr = ledgerRows(p.id, asOf); b = lr[lr.length - 1].bal; } catch (e) { continue; } if (b < -0.004) rows.push({ name: p.name, amt: r2(-b) }); }
+  return rows.sort((a, c) => c.amt - a.amt);
+}
+function ca2DP(asOf = today(), cfg = ca2DpCfg()) {
+  const stock = S.items.filter(i => i.type !== 'service').map(i => { const q = r2(stockAsOf(i.id, asOf)); return { name: i.name, unit: i.unit || '', qty: q, rate: num(i.purchaseRate), value: r2(Math.max(0, q) * num(i.purchaseRate)) }; }).filter(r => r.qty > 0);
+  const stockT = r2(stock.reduce((s, r) => s + r.value, 0));
+  const deb = ca2Debtors(asOf), cred = ca2Creditors(asOf);
+  const debYoung = r2(deb.reduce((s, r) => s + r.young, 0)), debOld = r2(deb.reduce((s, r) => s + r.old, 0)), credT = r2(cred.reduce((s, r) => s + r.amt, 0));
+  const sm = num(cfg.sm), dm = num(cfg.dm);
+  const netStock = r2(Math.max(0, stockT - credT));
+  const dpStock = r2(netStock * (1 - sm / 100)), dpDebt = r2(debYoung * (1 - dm / 100)), dp = r2(dpStock + dpDebt);
+  const limit = num(cfg.limit);
+  let used = 0; if (cfg.odAcc) { const b = accTotals(asOf).get(cfg.odAcc) || 0; used = r2(Math.max(0, -b)); }
+  const avail = limit ? r2(Math.min(dp, limit)) : dp;
+  return { asOf, stock, stockT, deb, cred, debYoung, debOld, credT, sm, dm, netStock, dpStock, dpDebt, dp, limit, used, avail, headroom: r2(avail - used), odName: cfg.odAcc ? accById(cfg.odAcc).name : '', bank: cfg.bank || '' };
+}
+function ca2DpPdf(D) {
+  const P = pdfDoc().page(), M = P.M, RW = P.W - M, c = co();
+  P.text(M, P.y + 6, `${c.name || 'Business'} — Stock statement for ${D.bank || 'bank'} (CC / OD)`, { size: 14, bold: true, w: RW - M });
+  P.y += 22; P.text(M, P.y, `As on ${fd(D.asOf)}${c.gstin ? '   GSTIN ' + c.gstin : ''}`, { size: 10 }); P.y += 18;
+  const table = (cols, rows) => { const tw = RW - M; let x = M; const xs = cols.map(cl => { const s = x; x += cl[1] * tw; return s; }); P.ensure(30); P.rect(M, P.y - 10, tw, 14, [0.94, 0.95, 0.98]); cols.forEach((cl, i) => P.text(cl[2] ? xs[i] + cl[1] * tw - 4 : xs[i] + 4, P.y, cl[0], { size: 8.5, bold: true, align: cl[2] ? 'right' : 'left', w: cl[1] * tw - 8 })); P.y += 15; rows.forEach(r => { P.ensure(14); cols.forEach((cl, i) => P.text(cl[2] ? xs[i] + cl[1] * tw - 4 : xs[i] + 4, P.y, String(r[i]), { size: 9, bold: !!r.b, align: cl[2] ? 'right' : 'left', w: cl[1] * tw - 8 })); P.y += 4; P.line(M, P.y, RW, P.y, 0.3, 0.85); P.y += 10; }); P.y += 8; };
+  const head = t => { P.ensure(36); P.text(M, P.y, t, { size: 11.5, bold: true, color: [0.2, 0.2, 0.45] }); P.y += 14; };
+  head('1. Stock'); table([['Item', 0.4], ['Qty', 0.18, 1], ['Rate', 0.18, 1], ['Value', 0.24, 1]], D.stock.map(r => [r.name, `${qf(r.qty)} ${r.unit}`, rs(r.rate), rs(r.value)]).concat([Object.assign(['Total stock', '', '', rs(D.stockT)], { b: 1 })]));
+  head('2. Debtors'); table([['Party', 0.4], ['Up to 90 days', 0.2, 1], ['Over 90 days', 0.2, 1], ['Total', 0.2, 1]], D.deb.map(r => [r.name, rs(r.young), rs(r.old), rs(r.total)]).concat([Object.assign(['Total debtors', rs(D.debYoung), rs(D.debOld), rs(r2(D.debYoung + D.debOld))], { b: 1 })]));
+  head('3. Creditors'); table([['Party', 0.7], ['Amount', 0.3, 1]], D.cred.map(r => [r.name, rs(r.amt)]).concat([Object.assign(['Total creditors', rs(D.credT)], { b: 1 })]));
+  head('4. Drawing power'); table([['Detail', 0.7], ['Amount', 0.3, 1]], [
+    ['Stock less creditors', rs(D.netStock)], [`Less stock margin ${D.sm}%`, rs(r2(D.netStock - D.dpStock))], ['Drawing power on stock', rs(D.dpStock)],
+    ['Debtors up to 90 days', rs(D.debYoung)], [`Less debtor margin ${D.dm}%`, rs(r2(D.debYoung - D.dpDebt))], ['Drawing power on debtors', rs(D.dpDebt)],
+    Object.assign(['Total drawing power', rs(D.dp)], { b: 1 }), ['Sanctioned limit', D.limit ? rs(D.limit) : 'Not entered'], ['Available (lower of the two)', rs(D.avail)], [`Used (${D.odName || 'OD / CC account'})`, rs(D.used)], Object.assign(['Headroom', rs(D.headroom)], { b: 1 })]);
+  P.ensure(40); P.text(M, P.y + 6, 'Certified that the above stock is fully paid / hypothecated to the bank and the figures are true as per our books.', { size: 9, w: RW - M }); P.y += 40;
+  P.text(RW, P.y, 'Authorised signatory', { size: 9, align: 'right' });
+  return P.build('Estimate from books - confirm with your CA');
+}
+
+/* ---- screen bodies (called from vCompliance) ---- */
+function ca2FySel() { return `<div class="f"><label>Financial year</label><select id="ca2Fy">${fyList().map(y => `<option value="${y}" ${y === ca2Fy() ? 'selected' : ''}>${fyLabel(y)}</option>`).join('')}</select></div>`; }
+function ca2Body(tab) {
+  const t = today(), C = ca2Comp(), ck = (id, on, lbl) => `<label class="ck"><input type="checkbox" id="${id}" ${on ? 'checked' : ''}> <span>${lbl}</span></label>`;
+  if (tab === 'audit') {
+    const R3 = ca2Form3cd(), A = R3.A, R = CA2_RULES.audit;
+    return `<div class="card">${ca2FySel()}${ck('ca2Prof', A.prof, 'I am a professional (doctor, lawyer, architect, consultant…)')}</div>
+    <div class="card" id="auditVerdict" style="border-left:4px solid ${A.applies ? '#dc2626' : '#16a34a'}"><b>${A.applies ? 'Tax audit likely needed' : 'Tax audit likely not needed'}</b><div style="font-size:13px;margin-top:4px">${esc(A.reason)}</div><div class="mu" style="font-size:11.5px;margin-top:4px">${esc(R.sec)} — ${esc(R.what)}</div></div>
+    <div class="grid2"><div class="stat"><div class="l">Turnover</div><div class="v" id="auditTurn">${inr(A.turnover)}</div></div><div class="stat"><div class="l">Cash receipts / payments</div><div class="v" id="auditCash">${A.rPct}% / ${A.pPct}%</div></div></div>
+    <div class="card mu" style="font-size:12.5px">${esc(A.presNote)}</div>
+    <div class="sect">Form 3CD helper — data from your books</div>
+    <div class="btns" style="margin-bottom:8px"><button class="btn sec" id="ca2Csv">⬇ CSV</button><button class="btn ghost" id="ca2Prt">🖨 Print</button></div>
+    <div class="card" id="ca2_3cd" style="overflow-x:auto">${repSecHTML(R3)}</div>`;
+  }
+  if (tab === 'firm') {
+    const c = ca2FirmCfg(), F = ca2Firm(), R = CA2_RULES.partner, rem = ca2Tagged('rem'), int = ca2Tagged('int');
+    const seg = `<div class="seg" id="ca2Biz">${CA2_BIZ.map(([k, l]) => `<button type="button" data-v="${k}" class="${c.type === k ? 'on' : ''}" onclick="segPick(this)">${l}</button>`).join('')}</div>`;
+    if (!F.on) return `<div class="card"><div class="f"><label>Business type</label>${seg}</div></div>${emptyBox('🧍', 'Partner limits apply to partnership firms and LLPs', c.type === 'company' ? 'Company: director pay is checked under company law and TDS, not here.' : 'Proprietor: your own withdrawals are drawings, not an expense.')}`;
+    const ledCk = (cls, sel) => ca2ExpLeds().map(l => `<label class="ck"><input type="checkbox" class="${cls}" value="${esc(l.id)}" ${sel.includes(l.id) ? 'checked' : ''}> <span>${esc(l.name)}</span></label>`).join('');
+    return `<div class="card"><div class="f"><label>Business type</label>${seg}</div>${ca2FySel()}<div class="f"><label>Interest on capital in deed (% a year, max ${R.intMax})</label><input id="ca2IntRate" inputmode="decimal" value="${esc(String(c.intRate ?? 12))}"></div></div>
+    <div class="sect">Partners</div><div class="list" id="ca2Partners">${F.partners.length ? F.partners.map(p => `<div class="row" onclick="ca2PartnerSheet('${p.id}')"><div class="av">${esc(initials(p.name))}</div><div class="m"><div class="t">${esc(p.name)}${p.working ? ' <span class="tag g">Working</span>' : ''}</div><div class="s">${esc(p.pan || 'PAN not given')} · ${esc(p.capName)} · opening capital ${inr(p.capital)}</div><div class="s">Interest at ${F.rate}%: ${inr(p.intAllowed)}</div></div></div>`).join('') : emptyBox('👥', 'No partners yet')}</div>
+    <button class="btn sec full" id="ca2AddP" style="margin:8px 0">+ Add partner</button>
+    <div class="card" id="ca2FirmCalc"><h3 style="margin:0 0 6px">Remuneration & interest check — ${fyLabel(F.y)}</h3>
+      <div class="kv"><span>Net profit as per books</span><b>${inr(F.np)}</b></div>
+      <div class="kv"><span>Add: partner remuneration debited</span><b>${inr(F.actRem)}</b></div>
+      <div class="kv"><span>Add: interest above 12%</span><b>${inr(F.intExcess)}</b></div>
+      <div class="kv"><span>Book profit</span><b id="ca2BP">${inr(F.bookProfit)}</b></div>
+      <div class="kv"><span>Maximum remuneration allowed${F.working ? '' : ' (no working partner)'}</span><b id="ca2Max">${inr(F.maxRem)}</b></div>
+      <div class="kv"><span>Remuneration paid</span><b>${inr(F.actRem)}</b></div>
+      <div class="kv"><span>Remuneration not allowed</span><b class="${F.remExcess ? 'rd' : ''}" id="ca2RemEx">${inr(F.remExcess)}</b></div>
+      <div class="kv"><span>Interest paid / allowed at 12% on opening capital</span><b>${inr(F.actInt)} / ${inr(F.intMaxT)}</b></div>
+      <div class="kv"><span>Interest not allowed</span><b class="${F.intExcess ? 'rd' : ''}" id="ca2IntEx">${inr(F.intExcess)}</b></div>
+      <div class="kv"><span>Total added back to income</span><b class="${F.disallowed ? 'rd' : ''}" id="ca2Dis">${inr(F.disallowed)}</b></div>
+      <div class="mu" style="font-size:11.5px;margin-top:6px">${esc(R.sec)}: ${esc(R.what)} Interest is worked on opening capital — adjust for money added or withdrawn during the year. TDS on partner payments may also apply — ask your CA.</div></div>
+    <details class="card"><summary><b>Which ledgers hold partner pay?</b></summary><div style="font-size:13px;margin-top:6px"><div class="mu" style="font-size:12px">Remuneration / salary to partners</div>${ledCk('ca2Rem', rem) || '<div class="mu">No expense ledgers</div>'}<div class="mu" style="font-size:12px;margin-top:8px">Interest to partners</div>${ledCk('ca2Int', int)}<div class="mu" style="font-size:11.5px;margin-top:6px">Tip: add expense categories named "Partner Remuneration" and "Interest to Partners".</div></div></details>`;
+  }
+  if (tab === 'q194') {
+    const Q = ca2Q194(), R = CA2_RULES.q194;
+    return `<div class="card" style="font-size:13px">${esc(R.what)}<div class="mu" style="font-size:11.5px;margin-top:4px">${esc(R.sec)}. ${esc(CA2_RULES.tcs1h.sec)}: ${esc(CA2_RULES.tcs1h.what)}</div></div>
+    <div class="card">${ca2FySel()}${ck('ca2Q194', Q.on, 'My turnover last year was above ₹10 crore')}<div class="mu" style="font-size:12px">Turnover in books for ${fyLabel(Q.y - 1)}: ${inr(Q.lastTurn)}${Q.lastTurn > R.buyerTurnover && !Q.on ? ' — above ₹10 crore, tick the box' : ''}</div></div>
+    ${Q.on ? `<div class="grid2"><div class="stat r"><div class="l">TDS to deduct (suppliers above ₹50 lakh)</div><div class="v" id="q194Tds">${inr(Q.tds)}</div></div><div class="stat ${Q.short ? 'r' : ''}"><div class="l">Not yet deducted</div><div class="v" id="q194Short">${inr(Q.short)}</div></div></div>` : '<div class="card mu" style="font-size:12.5px">Not applicable unless last year\'s turnover was above ₹10 crore. Running totals are shown for information.</div>'}
+    <div class="sect">Purchases per supplier — ${fyLabel(Q.y)} (before GST)</div><div class="list" id="q194List">${Q.rows.length ? Q.rows.map(r => `<div class="row" style="cursor:default"><div class="av">${r.flag ? '⚠️' : r.near ? '⏳' : '🛒'}</div><div class="m"><div class="t">${esc(r.name)}</div><div class="s">${r.flag ? `Crossed ₹50 lakh on ${fd(r.crossed)} · above limit ${inr(r.excess)}${Q.on ? ` · TDS ${r.rate}% = ${inr(r.tds)} · deducted ${inr(r.deducted)}` : ''}` : r.near ? `Close to ₹50 lakh — ${inr(r2(R.limit - r.total))} left` : 'Below ₹50 lakh'}${!r.pan && r.flag ? ' · <span class="rd">no PAN: 5%</span>' : ''}</div></div><div class="rt"><div class="a">${inr(r.total)}</div>${r.flag ? '<span class="tag r">Over</span>' : ''}</div></div>`).join('') : emptyBox('🛒', 'No purchases this year')}</div>`;
+  }
+  // dp
+  const cfg = ca2DpCfg(), mon = CA2_DPM || t.slice(0, 7), me = monthEnd(mon + '-01'), D = ca2DP(me < t ? me : t, cfg);
+  return `<div class="card" style="font-size:13px">${esc(CA2_RULES.dp.what)}</div>
+  <div class="card"><div class="f2"><div class="f"><label>Month</label><input type="month" id="dpMonth" value="${mon}"></div><div class="f"><label>Bank</label><input id="dpBank" value="${esc(cfg.bank)}" placeholder="e.g. SBI, Andheri"></div></div>
+  <div class="f2"><div class="f"><label>Stock margin %</label><input id="dpSm" inputmode="decimal" value="${cfg.sm}"></div><div class="f"><label>Debtor margin %</label><input id="dpDm" inputmode="decimal" value="${cfg.dm}"></div></div>
+  <div class="f2"><div class="f"><label>Sanctioned limit (₹)</label><input id="dpLimit" inputmode="decimal" value="${cfg.limit || ''}"></div><div class="f"><label>OD / CC account</label><select id="dpOd"><option value="">-- Select --</option>${ca2OdAccs().map(l => `<option value="${esc(l.id)}" ${l.id === cfg.odAcc ? 'selected' : ''}>${esc(l.name)}</option>`).join('')}</select></div></div>
+  <button class="btn sec full" id="dpSave">Save settings</button></div>
+  <div class="grid2"><div class="stat"><div class="l">Drawing power</div><div class="v" id="dpVal">${inr(D.dp)}</div></div><div class="stat ${D.headroom < 0 ? 'r' : ''}"><div class="l">Headroom (available − used)</div><div class="v" id="dpHead">${inr(D.headroom)}</div></div></div>
+  <div class="card" id="dpCalc" style="font-size:13px"><div class="kv"><span>Stock value (${D.stock.length} items)</span><b>${inr(D.stockT)}</b></div><div class="kv"><span>Less creditors</span><b>${inr(D.credT)}</b></div><div class="kv"><span>After ${D.sm}% margin</span><b>${inr(D.dpStock)}</b></div><div class="kv"><span>Debtors up to 90 days</span><b>${inr(D.debYoung)}</b></div><div class="kv"><span>Debtors over 90 days (not counted)</span><b>${inr(D.debOld)}</b></div><div class="kv"><span>After ${D.dm}% margin</span><b>${inr(D.dpDebt)}</b></div><div class="kv"><span>Sanctioned limit</span><b>${D.limit ? inr(D.limit) : 'Not entered'}</b></div><div class="kv"><span>Used on ${fd(D.asOf)}${D.odName ? ' (' + esc(D.odName) + ')' : ''}</span><b>${inr(D.used)}</b></div></div>
+  <div class="btns"><button class="btn full" id="dpPdf">📄 Stock statement PDF</button></div>`;
+}
+function ca2Bind() {
+  const fy = $('#ca2Fy'); if (fy) fy.onchange = () => { CA2_FY = +fy.value; vCompliance(); };
+  const setC = (id, k) => { const el = $('#' + id); if (el) el.onchange = async () => { S.settings.comp = { ...(S.settings.comp || {}), [k]: el.checked }; await saveSettings(); vCompliance(); }; };
+  setC('ca2Prof', 'prof'); setC('ca2Q194', 'q194');
+  const R3 = () => ca2Form3cd();
+  const cv = $('#ca2Csv'); if (cv) cv.onclick = () => { download(`Form3CD_helper_FY${ca2Fy()}.csv`, ca2CSV(R3()), 'text/csv'); toast('CSV downloaded'); };
+  const pr = $('#ca2Prt'); if (pr) pr.onclick = () => ca2Print(R3());
+  const bz = $('#ca2Biz'); if (bz) bz.onseg = async k => { await ca2SaveFirm({ type: k }); vCompliance(); };
+  const ir = $('#ca2IntRate'); if (ir) ir.onchange = async () => { const x = num(ir.value); if (x < 0 || x > CA2_RULES.partner.intMax) toast(`Above ${CA2_RULES.partner.intMax}% is not allowed — the extra will show as not allowed`); await ca2SaveFirm({ intRate: Math.max(0, x) }); vCompliance(); };
+  const ap = $('#ca2AddP'); if (ap) ap.onclick = () => ca2PartnerSheet('');
+  const tag = (cls, k) => $$('.' + cls).forEach(el => { el.onchange = async () => { await ca2SaveFirm({ [k]: $$('.' + cls).filter(x => x.checked).map(x => x.value) }); vCompliance(); }; });
+  tag('ca2Rem', 'remLeds'); tag('ca2Int', 'intLeds');
+  const dm = $('#dpMonth'); if (dm) dm.onchange = () => { if (/^\d{4}-\d\d$/.test(dm.value)) { CA2_DPM = dm.value; vCompliance(); } };
+  const ds = $('#dpSave'); if (ds) ds.onclick = async () => { S.settings.dp = { sm: Math.min(100, Math.max(0, num($('#dpSm').value))), dm: Math.min(100, Math.max(0, num($('#dpDm').value))), limit: r2(num($('#dpLimit').value)), odAcc: $('#dpOd').value, bank: $('#dpBank').value.trim() }; await saveSettings(); toast('Saved ✓'); vCompliance(); };
+  const dpp = $('#dpPdf'); if (dpp) dpp.onclick = () => { const t = today(), mon = CA2_DPM || t.slice(0, 7), me = monthEnd(mon + '-01'), D = ca2DP(me < t ? me : t); download(`Stock_Statement_${mon}.pdf`, new Blob([ca2DpPdf(D)], { type: 'application/pdf' }), 'application/pdf'); toast('PDF downloaded'); };
+}
+
 function canV(type) { const r = ROLE(); if (r === 'owner' || r === 'manager') return true; if (r === 'billing') return type === 'sale' || type === 'quote'; return false; }
 function canSeeV(v) { return ROLE() !== 'billing' || !['purchase', 'pret', 'payout', 'exp', ...ACC_T].includes(v.type); }
 function routeAllowed(a, b) {
