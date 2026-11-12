@@ -954,6 +954,7 @@ function vHome() {
   const recent = [...S.vouchers].sort(vSort).slice(0, 5);
   $('#main').innerHTML = `${ROLE() === 'ca' ? `<div class="card" id="caBanner" style="font-size:13px;border-left:4px solid #6366f1">👔 You are viewing <b>${esc(co().name || 'client')}</b> as Accountant / CA (read-only). <a href="#/clients">Switch client</a><div class="btns" style="margin-top:8px"><button class="btn ghost sm" id="caFull" onclick="fullReportSheet()">🖨 Full Client Report</button><button class="btn ghost sm" id="caXml" onclick="xmlSheet()">📤 Accounting XML export</button></div></div>` : ''}
   ${nq ? `<div class="card" id="qBadge" onclick="go('queries')" style="cursor:pointer;border-left:4px solid #f59e0b;display:flex;align-items:center;gap:8px">💬 <b><span id="qCount">${nq}</span> open question${nq === 1 ? '' : 's'}</b><span class="mu" style="font-size:12.5px">— tap to view and reply</span></div>` : ''}
+  ${wkHomeCard()}
   <div class="search" onclick="go('search')">${ICON.search}<input placeholder="Search party, item, invoice..." readonly onfocus="go('search')"></div>
   <div class="grid2">
     <div class="stat b" onclick="go('r/sales')"><div class="l">Today's Sales</div><div class="v" id="dTodaySale">${inr(todaySale)}</div></div>
@@ -2376,7 +2377,7 @@ const REPORTS_NOW = () => ALL_REPORTS.filter(r => repOk(r[4]));
 function vReports() {
   hdr('Reports', { back: true });
   $('#main').innerHTML = `<div class="list">${REPORTS_NOW().map(([k, i, l, s]) => `<div class="row" onclick="go('r/${k}')"><div class="av">${i}</div><div class="m"><div class="t">${l}</div><div class="s">${s}</div></div><span class="mu">›</span></div>`).join('')}${taxMode() === 'regular' ? `<div class="row" id="rep2b" onclick="go('gstr2b')"><div class="av">📥</div><div class="m"><div class="t">GSTR-2B Reconciliation</div><div class="s">Match portal GSTR-2B with your purchase bills — find ITC at risk</div></div><span class="mu">›</span></div>` : ''}</div>
-  <div class="sect">Export & print</div><div class="list"><div class="row" id="repFull" onclick="fullReportSheet()"><div class="av">🖨</div><div class="m"><div class="t">Full Client Report</div><div class="s">P&amp;L, Balance Sheet, Trial Balance, GST, TDS, outstanding, stock, expenses, open queries — print or save as PDF</div></div><span class="mu">›</span></div><div class="row" id="repXml" onclick="xmlSheet()"><div class="av">📤</div><div class="m"><div class="t">Accounting XML export</div><div class="s">Ledgers and entries as XML, for desktop accounting software</div></div><span class="mu">›</span></div></div>`;
+  <div class="sect">Export & print</div><div class="list"><div class="row" id="repWeekly" onclick="weeklySheet()"><div class="av">📊</div><div class="m"><div class="t">Weekly / Monthly Report</div><div class="s">One-page summary as PDF — share on WhatsApp or email, with previous-period comparison</div></div><span class="mu">›</span></div><div class="row" id="repFull" onclick="fullReportSheet()"><div class="av">🖨</div><div class="m"><div class="t">Full Client Report</div><div class="s">P&amp;L, Balance Sheet, Trial Balance, GST, TDS, outstanding, stock, expenses, open queries — print or save as PDF</div></div><span class="mu">›</span></div><div class="row" id="repXml" onclick="xmlSheet()"><div class="av">📤</div><div class="m"><div class="t">Accounting XML export</div><div class="s">Ledgers and entries as XML, for desktop accounting software</div></div><span class="mu">›</span></div></div>`;
 }
 const inR = v => v.date >= RANGE.from && v.date <= RANGE.to;
 const C_ = (h, n) => ({ h, n: !!n });
@@ -2865,6 +2866,218 @@ function xmlExport(from, to) {
   const xml = `<?xml version="1.0" encoding="UTF-8"?>\n<ENVELOPE><HEADER><TALLYREQUEST>Import Data</TALLYREQUEST></HEADER><BODY><IMPORTDATA><REQUESTDESC><REPORTNAME>All Masters</REPORTNAME><STATICVARIABLES><SVCURRENTCOMPANY>${xe(co().name || '')}</SVCURRENTCOMPANY></STATICVARIABLES></REQUESTDESC><REQUESTDATA>\n${[...led, ...vx].join('\n')}\n</REQUESTDATA></IMPORTDATA></BODY></ENVELOPE>\n`;
   return { xml, vouchers: V.length, ledgers: led.length };
 }
+/* ================= Weekly / Monthly Report PDF + share ================= */
+// Tiny self-contained PDF writer: A4, Helvetica / Helvetica-Bold (WinAnsi), text, lines, filled rects, multi-page.
+const PDF_W = [278,278,355,556,556,889,667,191,333,333,389,584,278,333,278,278,556,556,556,556,556,556,556,556,556,556,278,278,584,584,584,556,1015,667,667,722,722,667,611,778,722,278,500,667,556,833,722,778,667,778,722,667,611,722,667,944,667,667,611,278,278,278,469,556,333,556,556,500,556,556,278,556,556,222,222,500,222,833,556,556,556,556,333,500,278,556,500,722,500,500,500,334,260,334,584];
+const pdfTxt = s => String(s ?? '').replace(/₹\s?/g, 'Rs. ').replace(/[\u2013\u2014]/g, '-').replace(/[\u2018\u2019]/g, "'").replace(/[\u201c\u201d]/g, '"').replace(/[\u25b2]/g, '+').replace(/[\u25bc]/g, '-').replace(/[^\x20-\x7e\xa0-\xff]/g, '?');
+const pdfWidth = (s, sz, b) => { let w = 0; for (const ch of pdfTxt(s)) { const c = ch.charCodeAt(0); w += (c >= 32 && c <= 126 ? PDF_W[c - 32] : 556); } return w * sz / 1000 * (b ? 1.06 : 1); };
+const pdfFit = (s, w, sz, b) => { s = pdfTxt(s); if (pdfWidth(s, sz, b) <= w) return s; while (s.length > 1 && pdfWidth(s + '..', sz, b) > w) s = s.slice(0, -1); return s + '..'; };
+function pdfDoc() {
+  const W = 595.28, H = 841.89, M = 40; const pages = []; let cur = null;
+  const D = { W, H, M, y: 0 };
+  const esc_ = s => pdfTxt(s).replace(/\\/g, '\\\\').replace(/\(/g, '\\(').replace(/\)/g, '\\)');
+  const n2 = x => (Math.round(x * 100) / 100).toString();
+  D.page = () => { cur = []; pages.push(cur); D.y = M; return D; };
+  D.ensure = h => { if (!cur || D.y + h > H - M - 14) D.page(); return D; };
+  D.text = (x, y, s, o = {}) => { const sz = o.size || 10, b = !!o.bold; let t = pdfTxt(s); if (o.w) t = pdfFit(t, o.w, sz, b); let X = x; if (o.align === 'right') X = x - pdfWidth(t, sz, b); else if (o.align === 'center') X = x - pdfWidth(t, sz, b) / 2; const col = o.color || [0, 0, 0]; cur.push(`BT ${col.map(n2).join(' ')} rg /${b ? 'F2' : 'F1'} ${sz} Tf ${n2(X)} ${n2(H - y)} Td (${esc_(t)}) Tj ET`); return D; };
+  D.line = (x1, y1, x2, y2, w = 0.5, g = 0.6) => { cur.push(`${n2(g)} G ${n2(w)} w ${n2(x1)} ${n2(H - y1)} m ${n2(x2)} ${n2(H - y2)} l S`); return D; };
+  D.rect = (x, y, w, h, c = [0.93, 0.94, 1]) => { cur.push(`${c.map(n2).join(' ')} rg ${n2(x)} ${n2(H - y - h)} ${n2(w)} ${n2(h)} re f`); return D; };
+  D.build = (footer) => {
+    const objs = []; const add = s => { objs.push(s); return objs.length; };
+    add('<< /Type /Catalog /Pages 2 0 R >>'); add('');
+    add('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>');
+    add('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>');
+    const kids = [];
+    pages.forEach((ops, i) => {
+      const f = footer ? [`BT 0.4 0.4 0.4 rg /F1 8 Tf ${n2(M)} 22 Td (${esc_(footer)}) Tj ET`, `BT 0.4 0.4 0.4 rg /F1 8 Tf ${n2(W - M - pdfWidth(`Page ${i + 1} of ${pages.length}`, 8))} 22 Td (Page ${i + 1} of ${pages.length}) Tj ET`] : [];
+      const body = ops.concat(f).join('\n');
+      const c = add(`<< /Length ${body.length} >>\nstream\n${body}\nendstream`);
+      kids.push(add(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${n2(W)} ${n2(H)}] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents ${c} 0 R >>`));
+    });
+    objs[1] = `<< /Type /Pages /Kids [${kids.map(k => k + ' 0 R').join(' ')}] /Count ${kids.length} >>`;
+    let out = '%PDF-1.4\n%\xe2\xe3\xcf\xd3\n'; const off = [];
+    objs.forEach((o, i) => { off.push(out.length); out += `${i + 1} 0 obj\n${o}\nendobj\n`; });
+    const xr = out.length;
+    out += `xref\n0 ${objs.length + 1}\n0000000000 65535 f \n` + off.map(o => String(o).padStart(10, '0') + ' 00000 n \n').join('');
+    out += `trailer\n<< /Size ${objs.length + 1} /Root 1 0 R >>\nstartxref\n${xr}\n%%EOF\n`;
+    const u = new Uint8Array(out.length); for (let i = 0; i < out.length; i++) u[i] = out.charCodeAt(i) & 255;
+    return u;
+  };
+  return D;
+}
+// Mon-based week helpers
+const wkDow = d => (new Date(d + 'T00:00:00').getDay() + 6) % 7;
+const wkStart = d => addDays(d, -wkDow(d));
+const wkLast = (d = today()) => addDays(wkStart(d), -7);
+const monEnd = m => { const d = new Date(+m.slice(0, 4), +m.slice(5, 7), 0); return iso(d); };
+const WK_DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+function wkGet(k) { if (ROLE() === 'ca') { try { return localStorage.getItem('erpWk_' + k) ?? undefined; } catch (e) { return undefined; } } return S.settings[k]; }
+async function wkSet(k, v) { if (ROLE() === 'ca') { try { localStorage.setItem('erpWk_' + k, v); } catch (e) { } return; } S.settings[k] = v; try { await saveSettings(); } catch (e) { } }
+const wkDayIdx = () => { const x = wkGet('wkDay'); return x === undefined || x === null || x === '' ? 0 : +x; };
+function wkDue(d = today()) { return !!S.settings.setupDone && can('reports') && wkDow(d) >= wkDayIdx() && wkGet('lastWeeklyShown') !== wkLast(d); }
+async function wkMark(from) { if (from === wkLast()) await wkSet('lastWeeklyShown', from); }
+function wkPrev(from, to, kind) { if (kind === 'month') { const p = addDays(from, -1); return [monthStart(p), p]; } return [addDays(from, -7), addDays(to, -7)]; }
+function wkMetrics(from, to) {
+  const inr_ = v => v.date >= from && v.date <= to; const vs = S.vouchers.filter(inr_);
+  let sales = 0, salesN = 0, coll = 0, pur = 0, exp = 0, gOut = 0, gIn = 0; const cat = new Map(), its = new Map(), cus = new Map();
+  const tax = v => r2(num(v.cgst) + num(v.sgst) + num(v.igst) + num(v.cess));
+  for (const v of vs) {
+    if (v.type === 'sale' || v.type === 'dn') { sales += num(v.total); if (v.type === 'sale') { salesN++; coll += num(v.paid); const k = v.partyId || 'walkin'; const c = cus.get(k) || { name: v.partyId ? ((party(v.partyId) || {}).name || '') : (v.walkName || 'Walk-in / Cash'), a: 0, n: 0 }; c.a += num(v.total); c.n++; cus.set(k, c); (v.lines || []).forEach(l => { const a = its.get(l.itemId) || { name: l.name || ((item(l.itemId) || {}).name || ''), unit: l.unit || '', q: 0, a: 0 }; a.q += num(l.qty); a.a += num(l.taxable); its.set(l.itemId, a); }); } if (vMode(v) === 'regular' && !v.nonGst) gOut += tax(v); }
+    else if (v.type === 'sret' || v.type === 'cn') { sales -= num(v.total); if (vMode(v) === 'regular' && !v.nonGst) gOut -= tax(v); }
+    else if (v.type === 'payin') coll += num(v.amount);
+    else if (v.type === 'purchase') { pur += num(v.total); if (vMode(v) === 'regular' && v.itc !== false) gIn += tax(v); }
+    else if (v.type === 'pret') { pur -= num(v.total); if (vMode(v) === 'regular' && v.itc !== false) gIn -= tax(v); }
+    else if (v.type === 'exp') { exp += num(v.amount); const c = v.category || 'Other'; cat.set(c, (cat.get(c) || 0) + num(v.amount)); }
+  }
+  let gp = 0, np = 0; try { const P = plCalc(from, to); gp = P.gp; np = P.np; } catch (e) { }
+  return { sales: r2(sales), salesN, coll: r2(coll), pur: r2(pur), exp: r2(exp), gp: r2(gp), np: r2(np), gOut: r2(gOut), gIn: r2(gIn), cat: [...cat.entries()].sort((a, b) => b[1] - a[1]).map(([c, a]) => [c, r2(a)]), its: [...its.values()].sort((a, b) => b.a - a.a).slice(0, 5), cus: [...cus.values()].sort((a, b) => b.a - a.a).slice(0, 5) };
+}
+function wkData(from, to, kind = 'week') {
+  const m = wkMetrics(from, to), [pf, pt] = wkPrev(from, to, kind), pm = wkMetrics(pf, pt);
+  let cash = 0, bank = 0; try { const T = accTotals(to), L = accList(); T.forEach((b, id) => { const g = grpOf(id, L); if (g === 'cashg') cash += b; else if (g === 'bankg') bank += b; }); } catch (e) { }
+  const cd = num(S.settings.wkCreditDays) || 30, recv = [], pay = [];
+  for (const p of S.parties) {
+    let b = 0; try { const lr = ledgerRows(p.id, to); b = lr[lr.length - 1].bal; } catch (e) { continue; }
+    if (b > 0.004) {
+      let rem = b, od = '';
+      const bills = S.vouchers.filter(v => v.partyId === p.id && (v.type === 'sale' || v.type === 'dn') && v.date <= to).sort((a, c) => c.date.localeCompare(a.date));
+      for (const v of bills) { if (rem <= 0.004) break; const due = v.type === 'dn' ? num(v.total) : r2(num(v.total) - num(v.paid) - num(v.tds)); if (due <= 0.004) continue; od = v.date; rem -= due; }
+      const days = rem > 0.004 ? null : Math.round((new Date(to + 'T00:00:00') - new Date(od + 'T00:00:00')) / 864e5);
+      recv.push({ name: p.name, phone: p.phone || '', amt: r2(b), days, overdue: days === null || days > cd });
+    } else if (b < -0.004) pay.push({ name: p.name, amt: r2(-b) });
+  }
+  recv.sort((a, c) => c.amt - a.amt); pay.sort((a, c) => c.amt - a.amt);
+  const low = S.items.filter(i => i.type !== 'service' && num(i.lowStock) > 0).map(i => ({ name: i.name, unit: i.unit || '', q: r2(stockAsOf(i.id, to)), min: num(i.lowStock) })).filter(x => x.q <= x.min);
+  return { kind, from, to, pf, pt, m, pm, cash: r2(cash), bank: r2(bank), cd, recv, pay, low, recvT: r2(recv.reduce((s, x) => s + x.amt, 0)), odT: r2(recv.filter(x => x.overdue).reduce((s, x) => s + x.amt, 0)), payT: r2(pay.reduce((s, x) => s + x.amt, 0)) };
+}
+const wkPct = (a, b) => { a = r2(a); b = r2(b); if (Math.abs(b) < 0.005) return Math.abs(a) < 0.005 ? '0%' : 'new'; const p = (a - b) / Math.abs(b) * 100; return (p > 0 ? '+' : '') + (Math.round(p * 10) / 10) + '%'; };
+const wkLabel = R => R.kind === 'month' ? `${MON[+R.from.slice(5, 7) - 1]} ${R.from.slice(0, 4)}` : `${fd(R.from)} - ${fd(R.to)}`;
+const wkTitle = R => R.kind === 'month' ? 'Monthly Report' : 'Weekly Report';
+const rs = n => inr(n).replace('₹', 'Rs. ');
+function wkPdf(R) {
+  const P = pdfDoc().page(), c = co(), M = P.M, RW = P.W - M, m = R.m, pm = R.pm;
+  P.rect(M, P.y, RW - M, 58, [0.31, 0.27, 0.9]);
+  P.text(M + 12, P.y + 22, c.name || 'Business', { size: 16, bold: true, color: [1, 1, 1], w: RW - M - 180 });
+  P.text(RW - 12, P.y + 22, wkTitle(R), { size: 13, bold: true, color: [1, 1, 1], align: 'right' });
+  P.text(M + 12, P.y + 42, [c.gstin ? 'GSTIN: ' + c.gstin : '', c.phone || ''].filter(Boolean).join('   '), { size: 9, color: [1, 1, 1] });
+  P.text(RW - 12, P.y + 42, `${fd(R.from)} to ${fd(R.to)}`, { size: 10, color: [1, 1, 1], align: 'right' });
+  P.y += 76;
+  const head = t => { P.ensure(40); P.text(M, P.y, t, { size: 12, bold: true, color: [0.2, 0.2, 0.45] }); P.y += 5; P.line(M, P.y, RW, P.y, 0.8, 0.3); P.y += 13; };
+  const table = (cols, rows, empty) => {
+    const tw = RW - M; let x = M; const xs = cols.map(cl => { const s = x; x += cl.w * tw; return s; });
+    const hdrRow = () => { P.rect(M, P.y - 10, tw, 14, [0.94, 0.95, 0.98]); cols.forEach((cl, i) => P.text(cl.r ? xs[i] + cl.w * tw - 4 : xs[i] + 4, P.y, cl.h, { size: 8.5, bold: true, align: cl.r ? 'right' : 'left', w: cl.w * tw - 8 })); P.y += 15; };
+    P.ensure(30); hdrRow();
+    if (!rows.length) { P.text(M + 4, P.y, empty || 'Nothing to show', { size: 9, color: [0.45, 0.45, 0.45] }); P.y += 16; return; }
+    rows.forEach((r, ri) => { if (P.y + 14 > P.H - M - 14) { P.page(); hdrRow(); } cols.forEach((cl, i) => P.text(cl.r ? xs[i] + cl.w * tw - 4 : xs[i] + 4, P.y, r[i], { size: 9, bold: !!r.bold, align: cl.r ? 'right' : 'left', w: cl.w * tw - 8 })); P.y += 4; P.line(M, P.y, RW, P.y, 0.3, 0.85); P.y += 10; });
+    P.y += 6;
+  };
+  const W2 = [{ h: 'Detail', w: 0.4 }, { h: R.kind === 'month' ? 'This month' : 'This week', w: 0.22, r: 1 }, { h: R.kind === 'month' ? 'Previous month' : 'Previous week', w: 0.22, r: 1 }, { h: 'Change', w: 0.16, r: 1 }];
+  head('Summary');
+  table(W2, [
+    [`Sales (${m.salesN} bill${m.salesN === 1 ? '' : 's'}, after returns)`, rs(m.sales), rs(pm.sales), wkPct(m.sales, pm.sales)],
+    ['Collections received', rs(m.coll), rs(pm.coll), wkPct(m.coll, pm.coll)],
+    ['Purchases', rs(m.pur), rs(pm.pur), wkPct(m.pur, pm.pur)],
+    ['Expenses', rs(m.exp), rs(pm.exp), wkPct(m.exp, pm.exp)],
+    ['Gross profit (estimate)', rs(m.gp), rs(pm.gp), wkPct(m.gp, pm.gp)],
+    Object.assign(['Net profit (estimate)', rs(m.np), rs(pm.np), wkPct(m.np, pm.np)], { bold: 1 })
+  ]);
+  head(`Cash & bank (closing on ${fd(R.to)})`);
+  table([{ h: 'Account', w: 0.6 }, { h: 'Closing balance', w: 0.4, r: 1 }], [['Cash in hand', rs(R.cash)], ['Bank', rs(R.bank)], Object.assign(['Total cash + bank', rs(R.cash + R.bank)], { bold: 1 })]);
+  head('Expenses by category');
+  const top = m.cat.slice(0, 6), rest = m.cat.slice(6).reduce((s, x) => s + x[1], 0);
+  table([{ h: 'Category', w: 0.6 }, { h: 'Amount', w: 0.4, r: 1 }], [...top.map(([k, a]) => [k, rs(a)]), ...(rest ? [['Others', rs(rest)]] : [])], 'No expenses in this period');
+  head('Top 5 items sold');
+  table([{ h: '#', w: 0.07 }, { h: 'Item', w: 0.53 }, { h: 'Qty', w: 0.18, r: 1 }, { h: 'Value (before GST)', w: 0.22, r: 1 }], m.its.map((x, i) => [i + 1, x.name, `${qf(x.q)} ${x.unit}`, rs(x.a)]), 'No item sales in this period');
+  head('Top 5 customers');
+  table([{ h: '#', w: 0.07 }, { h: 'Customer', w: 0.53 }, { h: 'Bills', w: 0.15, r: 1 }, { h: 'Sales', w: 0.25, r: 1 }], m.cus.map((x, i) => [i + 1, x.name, x.n, rs(x.a)]), 'No sales in this period');
+  head(`Money to receive (as on ${fd(R.to)}) - total ${rs(R.recvT)}, overdue ${rs(R.odT)}`);
+  table([{ h: 'Customer', w: 0.44 }, { h: 'Phone', w: 0.18 }, { h: 'Oldest bill', w: 0.18, r: 1 }, { h: 'Amount', w: 0.2, r: 1 }], R.recv.slice(0, 10).map(x => [x.name + (x.overdue ? '  (OVERDUE)' : ''), x.phone, x.days === null ? 'Opening bal.' : `${x.days} days`, rs(x.amt)]), 'Nothing to receive');
+  head(`Money to pay (as on ${fd(R.to)}) - total ${rs(R.payT)}`);
+  table([{ h: 'Supplier', w: 0.7 }, { h: 'Amount', w: 0.3, r: 1 }], R.pay.slice(0, 10).map(x => [x.name, rs(x.amt)]), 'Nothing to pay');
+  head('Low stock items');
+  table([{ h: 'Item', w: 0.6 }, { h: 'In stock', w: 0.2, r: 1 }, { h: 'Alert level', w: 0.2, r: 1 }], R.low.map(x => [x.name, `${qf(x.q)} ${x.unit}`, `${qf(x.min)} ${x.unit}`]), 'No items below alert level');
+  if (isGstCo()) {
+    head('GST for the period');
+    table(W2, [['Output GST (on sales)', rs(m.gOut), rs(pm.gOut), wkPct(m.gOut, pm.gOut)], ['Input GST (on purchases)', rs(m.gIn), rs(pm.gIn), wkPct(m.gIn, pm.gIn)], Object.assign(['Net (output - input)', rs(m.gOut - m.gIn), rs(pm.gOut - pm.gIn), wkPct(m.gOut - m.gIn, pm.gOut - pm.gIn)], { bold: 1 })]);
+  }
+  P.ensure(8); P.text(M, P.y + 4, `Overdue = oldest unpaid bill older than ${R.cd} days. Profit is an estimate from entries as made. Generated ${fd(today())}.`, { size: 8, color: [0.4, 0.4, 0.4], w: RW - M });
+  return P.build(`${c.name || 'Business'} - ${wkTitle(R)} ${wkLabel(R)} - LedgerOne`);
+}
+function wkSummary(R) {
+  const m = R.m, pm = R.pm, c = co();
+  return [`*${c.name || 'Business'} — ${wkTitle(R)}*`, wkLabel(R),
+    `Sales: ${inr(m.sales)} (${m.salesN} bills) ${wkPct(m.sales, pm.sales)}`,
+    `Collections: ${inr(m.coll)}`, `Purchases: ${inr(m.pur)}`, `Expenses: ${inr(m.exp)}`,
+    `Net profit (est.): ${inr(m.np)} ${wkPct(m.np, pm.np)}`,
+    `Cash + Bank: ${inr(R.cash + R.bank)}`,
+    `To receive: ${inr(R.recvT)} (overdue ${inr(R.odT)})`, `To pay: ${inr(R.payT)}`,
+    ...(R.low.length ? [`Low stock: ${R.low.length} item${R.low.length === 1 ? '' : 's'}`] : []),
+    ...(isGstCo() ? [`GST out/in: ${inr(m.gOut)} / ${inr(m.gIn)}`] : [])].join('\n');
+}
+const wkFile = R => `${wkTitle(R).replace(' ', '_')}_${(co().name || 'business').replace(/\W+/g, '_')}_${R.from}_${R.to}.pdf`;
+const wkWaUrl = R => 'https://wa.me/?text=' + encodeURIComponent(wkSummary(R));
+const wkMailUrl = R => `mailto:?subject=${encodeURIComponent(`${co().name || 'Business'} — ${wkTitle(R)} ${wkLabel(R)}`)}&body=${encodeURIComponent(wkSummary(R).replace(/\*/g, '') + '\n\n(PDF report: please attach the downloaded PDF file.)')}`;
+async function wkShare(R, bytes) {
+  const name = wkFile(R), blob = new Blob([bytes], { type: 'application/pdf' });
+  try {
+    if (navigator.share && navigator.canShare && typeof File === 'function') {
+      const f = new File([blob], name, { type: 'application/pdf' });
+      if (navigator.canShare({ files: [f] })) { await navigator.share({ files: [f], title: wkTitle(R), text: wkSummary(R).replace(/\*/g, '') }); toast('Shared'); return 'shared'; }
+    }
+  } catch (e) { if (e && e.name === 'AbortError') return 'cancel'; }
+  download(name, blob, 'application/pdf'); toast('Sharing not available here — PDF downloaded'); return 'downloaded';
+}
+let WK_LAST = null;
+async function wkMake(from, to, kind) {
+  const R = wkData(from, to, kind), bytes = wkPdf(R); WK_LAST = { R, bytes };
+  if (kind === 'week') await wkMark(from);
+  const canFiles = !!(navigator.share && navigator.canShare);
+  sheet(`${wkTitle(R)} ready`, `<p style="margin:0 0 6px"><b>${esc(wkLabel(R))}</b></p><pre id="wkSum" style="white-space:pre-wrap;font:12.5px/1.45 inherit;background:var(--bg,#f4f4f7);padding:10px;border-radius:10px;margin:0 0 10px">${esc(wkSummary(R).replace(/\*/g, ''))}</pre>
+  <div class="btns" style="flex-direction:column;gap:8px"><button class="btn full" id="wkShare">📤 Share PDF${canFiles ? ' (WhatsApp, Gmail…)' : ''}</button><button class="btn sec full" id="wkDl">⬇ Download PDF</button><button class="btn ghost full" id="wkWa">💬 WhatsApp text summary</button><button class="btn ghost full" id="wkMail">✉️ Email summary</button></div>
+  <p class="mu" style="font-size:12px;margin:8px 0 0">WhatsApp text and Email send only the summary — attach the downloaded PDF yourself if needed.</p>`);
+  $('#wkShare').onclick = () => wkShare(R, bytes);
+  $('#wkDl').onclick = () => { download(wkFile(R), new Blob([bytes], { type: 'application/pdf' }), 'application/pdf'); toast('PDF downloaded'); };
+  $('#wkWa').onclick = () => window.open(wkWaUrl(R), '_blank', 'noopener');
+  $('#wkMail').onclick = () => { window.open(wkMailUrl(R), '_self'); };
+  return R;
+}
+function weeklySheet(kind = 'week') {
+  if (!can('reports')) return denyToast();
+  const lw = wkLast(), weeks = []; for (let i = 0; i < 12; i++) { const f = addDays(lw, -7 * i); weeks.push(f); }
+  const lm = monthStart(addDays(monthStart(), -1)).slice(0, 7), wd = wkDayIdx();
+  const notif = 'Notification' in window ? Notification.permission : 'unsupported';
+  sheet('Weekly / Monthly Report', `<div class="f"><label>Report for</label><select id="wk_kind"><option value="week" ${kind === 'week' ? 'selected' : ''}>A week (Mon – Sun)</option><option value="month" ${kind === 'month' ? 'selected' : ''}>A month</option></select></div>
+  <div class="f" id="wk_wbox" style="display:${kind === 'week' ? 'block' : 'none'}"><label>Week</label><select id="wk_week">${weeks.map((f, i) => `<option value="${f}">${fd(f)} – ${fd(addDays(f, 6))}${i === 0 ? ' (last week)' : ''}</option>`).join('')}<option value="${wkStart(today())}">${fd(wkStart(today()))} – ${fd(addDays(wkStart(today()), 6))} (this week so far)</option></select></div>
+  <div class="f" id="wk_mbox" style="display:${kind === 'month' ? 'block' : 'none'}"><label>Month</label><input type="month" id="wk_month" value="${lm}"></div>
+  <div class="sect" style="margin-top:12px">Reminder</div>
+  <div class="f2"><div class="f"><label>Weekly report day</label><select id="wk_day">${WK_DAYS.map((d, i) => `<option value="${i}" ${i === wd ? 'selected' : ''}>${d}</option>`).join('')}</select></div><div class="f"><label>Overdue after (days)</label><input id="wk_cd" inputmode="numeric" value="${num(S.settings.wkCreditDays) || 30}"></div></div>
+  <button class="btn ghost sm" id="wk_notif" ${notif === 'unsupported' || notif === 'granted' ? 'disabled' : ''}>🔔 ${notif === 'granted' ? 'Phone notification is on' : notif === 'unsupported' ? 'Notifications not supported here' : 'Also show a phone notification'}</button>
+  <p class="mu" style="font-size:12px;margin:8px 0 0">On or after this day, the Home screen shows "Your weekly report is ready" until you open it. The reminder (and notification) only works when you open the app — nothing is sent automatically.</p>`, `<button class="btn full" id="wk_go">📄 Create PDF</button>`);
+  $('#wk_kind').onchange = e => { const w = e.target.value === 'week'; $('#wk_wbox').style.display = w ? 'block' : 'none'; $('#wk_mbox').style.display = w ? 'none' : 'block'; };
+  $('#wk_day').onchange = e => wkSet('wkDay', +e.target.value);
+  $('#wk_cd').onchange = e => { const v = Math.max(1, Math.round(num(e.target.value)) || 30); if (ROLE() !== 'ca') wkSet('wkCreditDays', v); else S.settings.wkCreditDays = v; };
+  $('#wk_notif').onclick = async () => { try { const r = await Notification.requestPermission(); toast(r === 'granted' ? 'Notification on — shows when you open the app' : 'Notification not allowed'); } catch (e) { } };
+  $('#wk_go').onclick = () => {
+    const k = $('#wk_kind').value; let f, t;
+    if (k === 'week') { f = $('#wk_week').value; t = addDays(f, 6); } else { const mv = $('#wk_month').value; if (!mv) return toast('Pick a month'); f = mv + '-01'; t = monEnd(mv); }
+    closeOv(); wkMake(f, t, k);
+  };
+}
+function wkHomeCard() {
+  if (!can('reports')) return '';
+  if (wkDue()) return `<div class="card" id="wkBanner" style="border-left:4px solid #16a34a;display:flex;align-items:center;gap:8px">📊 <div style="flex:1;cursor:pointer" onclick="weeklySheet()"><b>Your weekly report is ready</b><div class="mu" style="font-size:12.5px">${fd(wkLast())} – ${fd(addDays(wkLast(), 6))} · tap to view & share</div></div><button class="hbtn" id="wkDismiss" aria-label="Dismiss" style="color:var(--mu)" onclick="wkMark(wkLast()).then(render)">✕</button></div>`;
+  return `<div class="card" id="wkCard" onclick="weeklySheet()" style="cursor:pointer;display:flex;align-items:center;gap:8px;font-size:13.5px">📊 <b>Weekly Report</b><span class="mu" style="font-size:12.5px">— PDF summary to share on WhatsApp / email</span></div>`;
+}
+async function wkNotify() {
+  try {
+    if (!wkDue() || !('Notification' in window) || Notification.permission !== 'granted' || wkGet('wkNotified') === wkLast()) return false;
+    const body = `${co().name || 'Business'}: report for ${fd(wkLast())} – ${fd(addDays(wkLast(), 6))}`;
+    let shown = false;
+    try { if (navigator.serviceWorker && navigator.serviceWorker.controller) { const r = await navigator.serviceWorker.ready; await r.showNotification('Your weekly report is ready', { body, icon: 'icon-192.png', tag: 'weekly' }); shown = true; } } catch (e) { }
+    if (!shown) new Notification('Your weekly report is ready', { body, icon: 'icon-192.png', tag: 'weekly' });
+    await wkSet('wkNotified', wkLast()); return true;
+  } catch (e) { return false; }
+}
 function periodSheet(title, btn, fn) {
   if (!can('reports')) return denyToast();
   const f0 = RANGE.touched ? RANGE.from : fyStart(), t0 = RANGE.touched ? RANGE.to : today();
@@ -2966,6 +3179,7 @@ function vSettings() {
   </div></div>
   <p class="mu" style="font-size:12px;margin:0 0 10px">Switching tax mode only affects new bills. Existing bills keep the tax they were created with.</p>
   <button class="btn full" id="s_save">Save Details</button></div>
+  ${can('reports') ? `<div class="sect">Weekly Report</div><div class="card"><button class="btn ghost full" id="setWeekly" onclick="weeklySheet()">📊 Weekly report &amp; reminder day (${WK_DAYS[wkDayIdx()]})</button></div>` : ''}
   <div class="sect">Security</div><div class="card"><div class="kv"><span>App PIN Lock</span><b id="pinState">${S.settings.pin ? 'ON 🔒' : 'OFF'}</b></div>
   <div class="btns" style="margin-top:10px">${S.settings.pin ? `<button class="btn sec" onclick="lockScreen('set1')">Change PIN</button><button class="btn dan" onclick="removePin()">Remove PIN</button>` : `<button class="btn sec" id="setPinBtn" onclick="lockScreen('set1')">Set 4-digit PIN</button>`}</div></div>
   ${lockCardHTML()}
@@ -3645,6 +3859,7 @@ document.addEventListener('visibilitychange', () => { if (document.hidden) HIDDE
   trackNav();
   if (S.settings.pin) lockScreen('unlock');
   render();
+  setTimeout(() => { wkNotify(); }, 1500);
   if ('serviceWorker' in navigator && /^https?:$/.test(location.protocol)) navigator.serviceWorker.register('./sw.js').catch(() => { });
 })();
 
