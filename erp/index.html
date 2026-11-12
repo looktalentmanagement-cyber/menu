@@ -952,7 +952,7 @@ function vHome() {
   S.vouchers.forEach(v => { if (v.type === 'sale' && v.date >= ms && v.date <= t) v.lines.forEach(l => { const a = agg.get(l.itemId) || { q: 0, a: 0, name: l.name, unit: l.unit }; a.q += num(l.qty); a.a += num(l.taxable); agg.set(l.itemId, a); }); });
   const top = [...agg.values()].sort((x, y) => y.a - x.a).slice(0, 5);
   const recent = [...S.vouchers].sort(vSort).slice(0, 5);
-  $('#main').innerHTML = `${ROLE() === 'ca' ? `<div class="card" id="caBanner" style="font-size:13px;border-left:4px solid #6366f1">👔 You are viewing <b>${esc(co().name || 'client')}</b> as Accountant / CA (read-only). <a href="#/clients">Switch client</a></div>` : ''}
+  $('#main').innerHTML = `${ROLE() === 'ca' ? `<div class="card" id="caBanner" style="font-size:13px;border-left:4px solid #6366f1">👔 You are viewing <b>${esc(co().name || 'client')}</b> as Accountant / CA (read-only). <a href="#/clients">Switch client</a><div class="btns" style="margin-top:8px"><button class="btn ghost sm" id="caFull" onclick="fullReportSheet()">🖨 Full Client Report</button><button class="btn ghost sm" id="caXml" onclick="xmlSheet()">📤 Accounting XML export</button></div></div>` : ''}
   ${nq ? `<div class="card" id="qBadge" onclick="go('queries')" style="cursor:pointer;border-left:4px solid #f59e0b;display:flex;align-items:center;gap:8px">💬 <b><span id="qCount">${nq}</span> open question${nq === 1 ? '' : 's'}</b><span class="mu" style="font-size:12.5px">— tap to view and reply</span></div>` : ''}
   <div class="search" onclick="go('search')">${ICON.search}<input placeholder="Search party, item, invoice..." readonly onfocus="go('search')"></div>
   <div class="grid2">
@@ -2375,7 +2375,8 @@ const repOk = w => w === 'all' || (w === 'gst' ? isGstCo() : w === taxMode());
 const REPORTS_NOW = () => ALL_REPORTS.filter(r => repOk(r[4]));
 function vReports() {
   hdr('Reports', { back: true });
-  $('#main').innerHTML = `<div class="list">${REPORTS_NOW().map(([k, i, l, s]) => `<div class="row" onclick="go('r/${k}')"><div class="av">${i}</div><div class="m"><div class="t">${l}</div><div class="s">${s}</div></div><span class="mu">›</span></div>`).join('')}${taxMode() === 'regular' ? `<div class="row" id="rep2b" onclick="go('gstr2b')"><div class="av">📥</div><div class="m"><div class="t">GSTR-2B Reconciliation</div><div class="s">Match portal GSTR-2B with your purchase bills — find ITC at risk</div></div><span class="mu">›</span></div>` : ''}</div>`;
+  $('#main').innerHTML = `<div class="list">${REPORTS_NOW().map(([k, i, l, s]) => `<div class="row" onclick="go('r/${k}')"><div class="av">${i}</div><div class="m"><div class="t">${l}</div><div class="s">${s}</div></div><span class="mu">›</span></div>`).join('')}${taxMode() === 'regular' ? `<div class="row" id="rep2b" onclick="go('gstr2b')"><div class="av">📥</div><div class="m"><div class="t">GSTR-2B Reconciliation</div><div class="s">Match portal GSTR-2B with your purchase bills — find ITC at risk</div></div><span class="mu">›</span></div>` : ''}</div>
+  <div class="sect">Export & print</div><div class="list"><div class="row" id="repFull" onclick="fullReportSheet()"><div class="av">🖨</div><div class="m"><div class="t">Full Client Report</div><div class="s">P&amp;L, Balance Sheet, Trial Balance, GST, TDS, outstanding, stock, expenses, open queries — print or save as PDF</div></div><span class="mu">›</span></div><div class="row" id="repXml" onclick="xmlSheet()"><div class="av">📤</div><div class="m"><div class="t">Accounting XML export</div><div class="s">Ledgers and entries as XML, for desktop accounting software</div></div><span class="mu">›</span></div></div>`;
 }
 const inR = v => v.date >= RANGE.from && v.date <= RANGE.to;
 const C_ = (h, n) => ({ h, n: !!n });
@@ -2840,6 +2841,65 @@ function exportJson(name) {
   download(`${R.title.replace(/\W+/g, '_')}_${co().gstin || 'NOGSTIN'}_${RANGE.from.slice(5, 7)}${RANGE.from.slice(0, 4)}.json`, JSON.stringify(R.json()), 'application/json');
   if (co().gstin) toast('JSON downloaded — upload it in the GST portal / offline tool');
 }
+
+/* ================= Accounting XML export + Full Client Report ================= */
+const xe = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;' }[c]));
+const xa = x => r2(x).toFixed(2);
+const XVT = { sale: 'Sales', purchase: 'Purchase', sret: 'Credit Note', cn: 'Credit Note', pret: 'Debit Note', dn: 'Debit Note', payin: 'Receipt', payout: 'Payment', rcpt: 'Receipt', pmt: 'Payment', contra: 'Contra', jv: 'Journal' };
+function xmlExport(from, to) {
+  const L = accList(), vs = S.vouchers.filter(v => v.date >= from && v.date <= to && v.type !== AUD_T && v.type !== QRY_T).sort((a, b) => a.date.localeCompare(b.date) || (a.createdAt || 0) - (b.createdAt || 0));
+  const names = new Map(), taken = new Set();
+  const nm = id => { if (names.has(id)) return names.get(id); let n = String(accById(id, L).name || id).trim() || String(id), b = n, k = 2; while (taken.has(n.toLowerCase())) n = `${b} (${k++})`; taken.add(n.toLowerCase()); names.set(id, n); return n; };
+  const used = new Set(), V = [];
+  vs.forEach(v => { const po = postings(v); if (!po.length) return; po.forEach(e => used.add(e.a)); V.push([v, po]); });
+  [...used].forEach(nm);
+  const ob = accTotals(addDays(from, -1));
+  const led = [...used].map(id => { const g = grpOf(id, L), b = IE_G.includes(g) ? 0 : num(ob.get(id)); return `<TALLYMESSAGE><LEDGER NAME="${xe(nm(id))}" ACTION="Create"><NAME.LIST><NAME>${xe(nm(id))}</NAME></NAME.LIST><PARENT>${xe(grpName(g))}</PARENT><OPENINGBALANCE>${xa(-b)}</OPENINGBALANCE></LEDGER></TALLYMESSAGE>`; });
+  const vx = V.map(([v, po]) => {
+    let t = XVT[v.type]; if (v.type === 'exp') t = po.some(e => isMoney(e.a)) ? 'Payment' : 'Journal';
+    const pl = v.partyId ? 'p:' + v.partyId : (SALES_SIDE(v.type) ? 'walkin' : '');
+    const pn = pl && used.has(pl) ? nm(pl) : nm((po.find(e => e.cr) || po[0]).a);
+    const nar = v.note || v.narration || (v.type === 'exp' ? [v.category, v.vendor].filter(Boolean).join(' - ') : '') || '';
+    return `<TALLYMESSAGE><VOUCHER VCHTYPE="${t}" ACTION="Create"><DATE>${v.date.replace(/-/g, '')}</DATE><VOUCHERTYPENAME>${t}</VOUCHERTYPENAME><VOUCHERNUMBER>${xe(v.no)}</VOUCHERNUMBER><PARTYLEDGERNAME>${xe(pn)}</PARTYLEDGERNAME><NARRATION>${xe(nar)}</NARRATION>${po.map(e => `<ALLLEDGERENTRIES.LIST><LEDGERNAME>${xe(nm(e.a))}</LEDGERNAME><ISDEEMEDPOSITIVE>${e.dr ? 'Yes' : 'No'}</ISDEEMEDPOSITIVE><AMOUNT>${xa(e.dr ? -e.dr : e.cr)}</AMOUNT></ALLLEDGERENTRIES.LIST>`).join('')}</VOUCHER></TALLYMESSAGE>`;
+  });
+  const xml = `<?xml version="1.0" encoding="UTF-8"?>\n<ENVELOPE><HEADER><TALLYREQUEST>Import Data</TALLYREQUEST></HEADER><BODY><IMPORTDATA><REQUESTDESC><REPORTNAME>All Masters</REPORTNAME><STATICVARIABLES><SVCURRENTCOMPANY>${xe(co().name || '')}</SVCURRENTCOMPANY></STATICVARIABLES></REQUESTDESC><REQUESTDATA>\n${[...led, ...vx].join('\n')}\n</REQUESTDATA></IMPORTDATA></BODY></ENVELOPE>\n`;
+  return { xml, vouchers: V.length, ledgers: led.length };
+}
+function periodSheet(title, btn, fn) {
+  if (!can('reports')) return denyToast();
+  const f0 = RANGE.touched ? RANGE.from : fyStart(), t0 = RANGE.touched ? RANGE.to : today();
+  sheet(title, `<div class="f2"><div class="f"><label>From</label><input type="date" id="xp_from" value="${f0}"></div><div class="f"><label>To</label><input type="date" id="xp_to" value="${t0}"></div></div>`, `<button class="btn full" id="xp_go">${btn}</button>`);
+  $('#xp_go').onclick = () => { const f = $('#xp_from').value, t = $('#xp_to').value; if (!f || !t || f > t) return toast('Pick a valid period'); closeOv(); fn(f, t); };
+}
+function xmlSheet() { periodSheet('Accounting XML export', '⬇ Download XML', (f, t) => { const r = xmlExport(f, t); download(`Accounting_Export_${(co().name || 'books').replace(/\W+/g, '_')}_${f}_${t}.xml`, r.xml, 'application/xml'); toast(`XML downloaded — ${r.vouchers} entries, ${r.ledgers} ledgers`); }); }
+function repSecHTML(R) {
+  return `${R.cards ? `<div class="kv" style="flex-wrap:wrap;gap:14px;margin:4px 0 8px">${R.cards.map(([l, x]) => `<span>${esc(l)}: <b>${esc(String(x))}</b></span>`).join('')}</div>` : ''}${R.sections.map(sx => `${sx.title ? `<h3 style="font-size:13px;margin:10px 0 4px">${esc(sx.title)}</h3>` : ''}${sx.rows.length ? `<table class="t" style="width:100%;border-collapse:collapse;font-size:10.5px"><thead><tr>${sx.cols.map(c => `<th${c.n ? ' class="n"' : ''}>${esc(c.h)}</th>`).join('')}</tr></thead><tbody>${sx.rows.map(r => `<tr>${r.map((x, i) => cellH(sx.cols[i] || {}, x)).join('')}</tr>`).join('')}${sx.total ? `<tr class="tot">${sx.total.map((x, i) => cellH(sx.cols[i] || {}, x)).join('')}</tr>` : ''}</tbody></table>` : '<p class="mu">No data for this period</p>'}`).join('')}${R.note ? `<p class="mu" style="font-size:10px">${esc(R.note)}</p>` : ''}`;
+}
+function fullReportHTML(from, to) {
+  const sv = { ...RANGE }; RANGE.from = from; RANGE.to = to; RANGE.p = 'custom';
+  const c = co(), out = [], sec = (h, body) => out.push(`<section class="frs" style="page-break-before:always;break-before:page"><h2 style="font-size:16px;border-bottom:2px solid #111;padding-bottom:4px">${esc(h)}</h2>${body}</section>`);
+  const rep = n => { try { return repSecHTML(buildReport(n)); } catch (e) { return `<p class="mu">Could not build this section.</p>`; } };
+  try {
+    out.push(`<section class="frs" style="text-align:center;padding-top:80px"><h1 style="font-size:26px">${esc(c.name || 'Business')}</h1>${c.gstin ? `<p>GSTIN: <b>${esc(c.gstin)}</b></p>` : ''}${c.address ? `<p style="white-space:pre-wrap">${esc(c.address)}</p>` : ''}<h2 style="margin-top:40px">Full Client Report</h2><p>Period: <b>${fd(from)}</b> to <b>${fd(to)}</b></p><p class="mu">Generated on ${fd(today())}</p></section>`);
+    sec('Profit & Loss', rep('pl'));
+    sec('Balance Sheet', rep('bs'));
+    sec('Trial Balance', rep('tb'));
+    const reg = taxMode() === 'regular', na = '<p class="mu">Not applicable — business is not a regular GST taxpayer.</p>';
+    sec('GSTR-1 Summary', reg ? rep('gstr1') : na);
+    sec('GSTR-3B Summary', reg ? rep('gstr3b') : na);
+    const b = S.settings.s2b;
+    sec('GSTR-2B Reconciliation (last run)', b ? `<p>Month: <b>${esc(b.month)}</b>${b.at ? ` · run on ${fd(iso(new Date(b.at)))}` : ''}</p><table class="t" style="width:100%;font-size:11px"><thead><tr><th>Result</th><th class="n">Bills</th><th class="n">ITC in 2B</th><th class="n">ITC in books</th></tr></thead><tbody>${B2T.map(([k, l]) => `<tr><td>${esc(l)}</td><td class="n">${num((b.counts || {})[k])}</td><td class="n">${nfa(num(((b.itc || {})[k] || {}).in2b))}</td><td class="n">${nfa(num(((b.itc || {})[k] || {}).inBooks))}</td></tr>`).join('')}</tbody></table>` : '<p class="mu">No GSTR-2B reconciliation has been run yet.</p>');
+    sec('TDS Summary', rep('tds'));
+    sec('Debtors & Creditors Outstanding', rep('outstanding'));
+    sec('Stock Summary', rep('stock'));
+    sec('Expenses by Category', rep('expenses'));
+    const q = S.queries.filter(x => x.status !== 'resolved').sort((a, b) => (a.at || 0) - (b.at || 0));
+    sec('Open Queries', q.length ? `<table class="t" style="width:100%;font-size:11px"><thead><tr><th>Date</th><th>About</th><th>Question</th><th>Asked by</th><th class="n">Replies</th></tr></thead><tbody>${q.map(x => `<tr><td>${x.at ? fd(iso(new Date(x.at))) : ''}</td><td>${esc(qLabel(x))}</td><td>${esc(x.text)}</td><td>${esc(x.by || '')}</td><td class="n">${(x.replies || []).length}</td></tr>`).join('')}</tbody></table>` : '<p class="mu">No open queries.</p>');
+  } finally { Object.assign(RANGE, sv); }
+  return `<div class="inv frep">${out.join('')}<p class="frfoot" style="margin-top:16px;font-size:10px;text-align:center;border-top:1px solid #999;padding-top:6px">Prepared from LedgerOne — figures as entered; verify before filing.</p></div>`;
+}
+function fullReport(from, to) { $('#print').innerHTML = fullReportHTML(from, to); toast('Opening print — save as PDF to share'); setTimeout(() => window.print(), 50); }
+function fullReportSheet() { periodSheet('Full Client Report', '🖨 Build & print report', fullReport); }
 
 /* ================= Settings ================= */
 function taxModeSeg(id, val) { return `<div class="seg" id="${id}">${TAXMODES.map(([k, l]) => `<button type="button" data-v="${k}" class="${val === k ? 'on' : ''}" onclick="segPick(this)">${l}</button>`).join('')}</div>`; }
