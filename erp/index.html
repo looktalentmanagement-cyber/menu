@@ -866,7 +866,7 @@ function route() {
       case 'exp': return b === 'new' ? vExpForm(null) : vExpList();
       case 'prod': return b === 'new' ? vProdForm(null) : vProdList();
       case 'reports': return vReports();
-      case 'r': if (q.acc) LEDGER_ACC = q.acc; return vReport(b);
+      case 'r': if (b === 'compliance') return vCompliance(q); if (q.acc) LEDGER_ACC = q.acc; return vReport(b);
       case 'accounts': return vAccounts();
       case 'brs': return vBrs();
       case 'tax': return vTax();
@@ -875,6 +875,7 @@ function route() {
       case 'settings': return vSettings();
       case 'audit': return vAudit(b);
       case 'queries': return vQueries();
+      case 'compliance': return vCompliance(q);
       default: go('home');
     }
   } catch (e) { console.warn(e); $('#main').innerHTML = emptyBox('⚠️', 'Something went wrong', esc(e.message)); }
@@ -955,6 +956,7 @@ function vHome() {
   $('#main').innerHTML = `${ROLE() === 'ca' ? `<div class="card" id="caBanner" style="font-size:13px;border-left:4px solid #6366f1">👔 You are viewing <b>${esc(co().name || 'client')}</b> as Accountant / CA (read-only). <a href="#/clients">Switch client</a><div class="btns" style="margin-top:8px"><button class="btn ghost sm" id="caFull" onclick="fullReportSheet()">🖨 Full Client Report</button><button class="btn ghost sm" id="caXml" onclick="xmlSheet()">📤 Accounting XML export</button></div></div>` : ''}
   ${nq ? `<div class="card" id="qBadge" onclick="go('queries')" style="cursor:pointer;border-left:4px solid #f59e0b;display:flex;align-items:center;gap:8px">💬 <b><span id="qCount">${nq}</span> open question${nq === 1 ? '' : 's'}</b><span class="mu" style="font-size:12.5px">— tap to view and reply</span></div>` : ''}
   ${wkHomeCard()}
+  ${cmpHomeCard()}
   <div class="search" onclick="go('search')">${ICON.search}<input placeholder="Search party, item, invoice..." readonly onfocus="go('search')"></div>
   <div class="grid2">
     <div class="stat b" onclick="go('r/sales')"><div class="l">Today's Sales</div><div class="v" id="dTodaySale">${inr(todaySale)}</div></div>
@@ -1158,6 +1160,10 @@ function vPartyForm(id, q) {
   <div class="f"><label>State</label><select id="p_state">${stateOpts(p.state)}</select></div>
   <div class="f2"><div class="f"><label>PAN (optional)</label><input id="p_pan" maxlength="10" style="text-transform:uppercase" value="${esc(p.pan || '')}" placeholder="ABCDE1234F" oninput="panHint(this)"><div id="p_panMsg" class="mu" style="font-size:12px;margin-top:4px"></div></div>
   <div class="f"><label>Default TDS section</label><select id="p_tdsSec">${TDS_SECS.map(([k, l]) => `<option value="${k}" ${(p.tdsSec || '') === k ? 'selected' : ''}>${l}</option>`).join('')}</select></div></div>
+  <div class="card" style="margin:0 0 12px;padding:10px;background:#f8fafc"><label class="ck"><input type="checkbox" id="p_msme" ${p.msme ? 'checked' : ''} onchange="$('#p_msmeBox').style.display=this.checked?'block':'none'"> <span>MSME (Udyam) registered supplier</span></label>
+  <div id="p_msmeBox" style="display:${p.msme ? 'block' : 'none'}"><div class="f2"><div class="f"><label>Udyam no.</label><input id="p_udyam" maxlength="19" style="text-transform:uppercase" value="${esc(p.udyam || '')}" placeholder="UDYAM-MH-00-0000000"></div><div class="f"><label>Category</label><select id="p_msmeCat">${[['micro', 'Micro'], ['small', 'Small'], ['medium', 'Medium (no 45-day rule)']].map(([k, l]) => `<option value="${k}" ${(p.msmeCat || 'micro') === k ? 'selected' : ''}>${l}</option>`).join('')}</select></div></div>
+  <label class="ck"><input type="checkbox" id="p_msmeAgree" ${p.msmeAgree ? 'checked' : ''}> <span>Written agreement on payment days (else 15 days)</span></label><div class="f"><label>Agreed days (max 45)</label><input id="p_msmeDays" inputmode="numeric" value="${p.msmeDays || ''}" placeholder="45"></div></div>
+  <label class="ck"><input type="checkbox" id="p_transporter" ${p.transporter ? 'checked' : ''}> <span>Goods transporter (cash limit ₹35,000 a day)</span></label></div>
   <div class="f"><label>Address</label><textarea id="p_address">${esc(p.address)}</textarea></div>
   <div class="f2"><div class="f"><label>City</label><input id="p_city" value="${esc(p.city || '')}"></div><div class="f"><label>PIN Code</label><input id="p_pin" inputmode="numeric" maxlength="6" value="${esc(p.pin || '')}"></div></div>
   <div class="f"><label>Opening Balance (₹)</label><input id="p_ob" inputmode="decimal" value="${ob ? Math.abs(ob) : ''}" placeholder="0"></div>
@@ -1170,6 +1176,8 @@ function vPartyForm(id, q) {
     if (r.gstin && gstinErr(r.gstin)) return toast(gstinErr(r.gstin));
     r.pan = $('#p_pan').value.trim().toUpperCase(); if (r.pan && !PAN_RE.test(r.pan)) return toast('PAN should look like ABCDE1234F (5 letters, 4 digits, 1 letter)'); if (!r.pan) delete r.pan;
     r.tdsSec = $('#p_tdsSec').value; if (!r.tdsSec) delete r.tdsSec;
+    r.msme = $('#p_msme').checked; if (r.msme) { r.udyam = $('#p_udyam').value.trim().toUpperCase(); r.msmeCat = $('#p_msmeCat').value; r.msmeAgree = $('#p_msmeAgree').checked; r.msmeDays = Math.min(45, Math.max(0, Math.round(num($('#p_msmeDays').value)))) || 0; if (r.udyam && !/^UDYAM-[A-Z]{2}-\d{2}-\d{7}$/.test(r.udyam)) return toast('Udyam number should look like UDYAM-MH-00-0000000'); } else ['msme', 'udyam', 'msmeCat', 'msmeAgree', 'msmeDays'].forEach(k => delete r[k]);
+    r.transporter = $('#p_transporter').checked; if (!r.transporter) delete r.transporter;
     if (r.gstin && r.state !== r.gstin.slice(0, 2)) r.state = r.gstin.slice(0, 2);
     if (r.pin && !/^\d{6}$/.test(r.pin)) return toast('PIN code must be 6 digits');
     const amt = num($('#p_ob').value); r.openBal = segVal('p_obt') === 'p' ? -amt : amt;
@@ -1230,7 +1238,7 @@ function exportLedger(id) {
 /* ================= More ================= */
 function vMore() {
   hdr('More', { right: searchBtn() });
-  const m = [['reports', '📊', 'Reports'], ['exp', '💸', 'Expenses'], ['prod', '🏭', 'Production'], ['bill?f=quote', '📝', 'Quotations'], ['bill?f=pay', '💰', 'Payments'], ['bill?f=ret', '↩', 'Returns / CN / DN'], ...(taxMode() === 'regular' ? [['r/gstr1', '📤', 'GSTR-1'], ['r/gstr3b', '🧮', 'GSTR-3B'], ...(can('reports') ? [['gstr2b', '📥', 'GSTR-2B Match']] : [])] : taxMode() === 'composition' ? [['r/cmp08', '🧾', 'CMP-08']] : []), ['r/pl', '📈', 'Profit & Loss'], ['r/bs', '🏛', 'Balance Sheet'], ['accounts', '📚', 'Accounts'], ['r/tb', '⚖️', 'Trial Balance'], ['brs', '🏦', 'Bank Reconciliation'], ['tax', '💡', 'Tax Saving'], ['audit', '🕵', 'Audit Trail'], ...(can('query') ? [['queries', '💬', 'Queries' + (qOpen() ? ` (${qOpen()})` : '')]] : []), ...(caAcct() ? [['clients', '👥', 'My Clients']] : []), ['settings', '⚙️', 'Settings & Backup']];
+  const m = [['reports', '📊', 'Reports'], ...(can('reports') ? [['compliance', '🗓', 'Compliance']] : []), ['exp', '💸', 'Expenses'], ['prod', '🏭', 'Production'], ['bill?f=quote', '📝', 'Quotations'], ['bill?f=pay', '💰', 'Payments'], ['bill?f=ret', '↩', 'Returns / CN / DN'], ...(taxMode() === 'regular' ? [['r/gstr1', '📤', 'GSTR-1'], ['r/gstr3b', '🧮', 'GSTR-3B'], ...(can('reports') ? [['gstr2b', '📥', 'GSTR-2B Match']] : [])] : taxMode() === 'composition' ? [['r/cmp08', '🧾', 'CMP-08']] : []), ['r/pl', '📈', 'Profit & Loss'], ['r/bs', '🏛', 'Balance Sheet'], ['accounts', '📚', 'Accounts'], ['r/tb', '⚖️', 'Trial Balance'], ['brs', '🏦', 'Bank Reconciliation'], ['tax', '💡', 'Tax Saving'], ['audit', '🕵', 'Audit Trail'], ...(can('query') ? [['queries', '💬', 'Queries' + (qOpen() ? ` (${qOpen()})` : '')]] : []), ...(caAcct() ? [['clients', '👥', 'My Clients']] : []), ['settings', '⚙️', 'Settings & Backup']];
   $('#main').innerHTML = `<div class="mgrid">${m.map(([h, i, l]) => `<button onclick="go('${h}')"><span class="i">${i}</span>${l}</button>`).join('')}</div>
   <div class="card"><h3>New Entry</h3><div class="btns"><button class="btn" onclick="go('new/sale')">+ Sales Invoice</button><button class="btn sec" onclick="go('new/purchase')">+ Purchase Bill</button><button class="btn ghost" onclick="go('new/quote')">+ Quotation</button></div></div>
   <div class="card"><div class="kv"><span>Business</span><b>${esc(co().name)}</b></div><div class="kv"><span>Tax mode</span><span id="moreTax">${TAXMODES.find(x => x[0] === taxMode())[1]}</span></div>${isGstCo() ? `<div class="kv"><span>GSTIN</span><span>${esc(co().gstin || '—')}</span></div>` : ''}<div class="kv"><span>Data</span><span>${S.items.length} items · ${S.parties.length} parties · ${S.vouchers.length} entries</span></div></div>`;
@@ -1453,7 +1461,7 @@ async function saveVoucher() {
   if (t.stock < 0) { const needs = new Map(); v.lines.forEach(l => needs.set(l.itemId, (needs.get(l.itemId) || 0) + num(l.qty))); const old = F.isNew ? null : vch(v.id); if (!(await stockWarn(needs, old))) return; }
   await saveRec('vouchers', v); await bumpNo(v.type, v.no, v.date, v.type === 'sale' && v.nonGst);
   if (v.fromQuote) { const qv = vch(v.fromQuote); if (qv && qv.converted !== v.id) { qv.converted = v.id; qv.convertedNo = v.no; await saveRec('vouchers', qv); } }
-  toast(`${t.hi} ${v.no} saved ✓`); F = null; replaceTo('v/' + v.id);
+  toast(`${t.hi} ${v.no} saved ✓`); F = null; replaceTo('v/' + v.id); cmpCashNotice(v);
 }
 
 /* ================= Voucher view / invoice ================= */
@@ -1689,7 +1697,7 @@ function vPayForm(type, existing, q) {
     rd(); v.amount = r2(num(v.amount));
     if (!v.partyId) return toast('Select a party'); if (!(v.amount > 0)) return toast('Enter the amount'); if (!v.no) return toast('Enter the receipt number');
     if (S.vouchers.some(x => x.id !== v.id && x.type === v.type && x.no === v.no)) return toast(`${v.no} already exists`);
-    await saveRec('vouchers', v); await bumpNo(type, v.no); toast('Payment entry saved ✓'); F = null; replaceTo('v/' + v.id);
+    await saveRec('vouchers', v); await bumpNo(type, v.no); toast('Payment entry saved ✓'); F = null; replaceTo('v/' + v.id); cmpCashNotice(v);
   };
 }
 
@@ -1804,7 +1812,7 @@ function vExpForm(existing) {
     v.tds = r2(num($('#ef_tds').value)); if (v.tds < 0 || v.tds >= v.amount) return toast('TDS must be less than the expense amount'); if (!v.tds) delete v.tds;
     v.tdsParty = $('#ef_tdsParty').value; if (!v.tdsParty) delete v.tdsParty; v.tdsSec = $('#ef_tdsSec').value; if (!v.tdsSec) delete v.tdsSec;
     if (photo) v.photo = photo; else delete v.photo;
-    await saveRec('vouchers', v); await bumpNo('exp', v.no); toast('Expense saved ✓'); replaceTo('exp');
+    await saveRec('vouchers', v); await bumpNo('exp', v.no); toast('Expense saved ✓'); replaceTo('exp'); cmpCashNotice(v);
   };
 }
 
@@ -2322,7 +2330,7 @@ function vAcvForm(type, existing) {
     if (!rec.no) return toast('Enter the voucher number');
     if (S.vouchers.some(x => x.id !== rec.id && x.type === rec.type && x.no === rec.no)) return toast(`${rec.no} already exists`);
     rec.amount = r2(rec.entries.reduce((s, e) => s + e.dr, 0));
-    await saveRec('vouchers', rec); await bumpNo(type, rec.no); toast(`${t.hi} saved ✓`); F = null; replaceTo('v/' + rec.id);
+    await saveRec('vouchers', rec); await bumpNo(type, rec.no); toast(`${t.hi} saved ✓`); F = null; replaceTo('v/' + rec.id); cmpCashNotice(rec);
   };
 }
 
@@ -2346,6 +2354,7 @@ function setPreset(p) {
 }
 function setMonth(m) { if (!m) return; RANGE.touched = true; RANGE.from = m + '-01'; RANGE.to = monthEnd(RANGE.from); RANGE.p = 'custom'; render(); }
 const ALL_REPORTS = [
+  ['compliance', '🗓', 'Compliance (CA pack)', 'Due dates, MSME 45-day, cash limits, ITC 180-day', 'all'],
   ['sales', '🧾', 'Sales Register', 'All sales invoices', 'all'],
   ['purchase', '🛒', 'Purchase Register', 'All purchase bills', 'all'],
   ['gstr1', '📤', 'GSTR-1', 'B2B, B2CL, B2CS, CDNR, CDNUR, HSN, Docs + JSON', 'regular'],
@@ -3285,6 +3294,258 @@ function can(x) {
     default: return false;
   }
 }
+/* ================= Compliance pack (I1): calendar, MSME payments, cash limits, ITC 180-day ================= */
+/* Editable rule table. Every figure was checked against the source shown, as of the date in COMP_ASOF.
+   Section numbers: Income-tax Act 2025 (in force 1 Apr 2026, tax year 2026-27 on) with the old 1961 Act number in brackets.
+   Estimate — confirm with your CA. Governments extend due dates by notification; add them to COMP_EXT. */
+const COMP_ASOF = '2026-11-12';
+const COMPLIANCE_RULES = {
+  msme: { noAgree: 15, maxAgree: 45, sec: 'Sec 37(2)(g) (old 43B(h)) + MSMED Act sec 15', what: 'Pay micro / small (Udyam) suppliers within 15 days, or the agreed days (max 45). If still unpaid on 31 March, the expense is allowed only in the year you pay.', src: 'https://www.incometaxindia.gov.in/w/section-37-169' },
+  cashExp: { limit: 10000, transporter: 35000, sec: 'Sec 36(4) / 36(6) (old 40A(3))', what: 'Cash paid to one person in one day above ₹10,000 (₹35,000 to goods transporters) is not allowed as an expense.', src: 'https://www.incometaxindia.gov.in/documents/d/guest/income_tax_act_2025_as_amended_by_fa_act_2026-pdf' },
+  cashRcpt: { limit: 200000, sec: 'Sec 186 (old 269ST)', what: 'Do not receive ₹2,00,000 or more in cash from one person in a day, or for one bill / one event. Penalty equals the amount received.', src: 'https://wm.incometaxindia.gov.in/w/section-269st-4' },
+  cashLoan: { limit: 20000, secIn: 'Sec 185 (old 269SS)', secOut: 'Sec 188 (old 269T)', what: 'Loans / deposits of ₹20,000 or more must be taken and repaid through bank, not cash.', src: 'https://www.incometaxindia.gov.in/documents/d/guest/income_tax_act_2025_as_amended_by_fa_act_2026-pdf' },
+  itc180: { days: 180, rate: 18, sec: 'CGST sec 16(2) 2nd proviso + Rule 37', what: 'If a supplier is not paid in full within 180 days of the invoice, reverse the GST credit (in proportion to the unpaid part) with interest. Take it back once you pay.', src: 'https://taxinformation.cbic.gov.in/content/html/tax_repository/gst/rules/cgst_rules/active/chapter5/rule37_v1.00.html' },
+  // due-date rules. k: m = monthly (due in the next month), q = quarterly (due after the quarter), y = yearly (md + year offset from FY start)
+  due: [
+    { id: 'gstr1', name: 'GSTR-1 — sales details', when: 'gstM', k: 'm', day: 11, sec: 'CGST Rule 59', src: 'https://tutorial.gst.gov.in/userguide/returns/GSTR_1.htm' },
+    { id: 'gstr3b', name: 'GSTR-3B — monthly return + GST payment', when: 'gstM', k: 'm', day: 20, sec: 'CGST Rule 61', src: 'https://tutorial.gst.gov.in/userguide/returns/GSTR3B.htm' },
+    { id: 'iff', name: 'IFF — upload B2B invoices (optional)', when: 'gstQ', k: 'm', day: 13, qm: [0, 1], sec: 'CGST Rule 59(2)', src: 'https://tutorial.gst.gov.in/userguide/returns/GSTR_1.htm' },
+    { id: 'pmt06', name: 'PMT-06 — pay GST for the month (QRMP)', when: 'gstQ', k: 'm', day: 25, qm: [0, 1], sec: 'CGST Rule 61(3)', src: 'https://taxinformation.cbic.gov.in/content/html/tax_repository/gst/rules/cgst_rules/active/chapter8/rule61_v1.00.html' },
+    { id: 'gstr1q', name: 'GSTR-1 — quarterly sales details (QRMP)', when: 'gstQ', k: 'q', day: 13, sec: 'CGST Rule 59', src: 'https://tutorial.gst.gov.in/userguide/returns/GSTR_1.htm' },
+    { id: 'gstr3bq', name: 'GSTR-3B — quarterly return (QRMP)', when: 'gstQ', k: 'q', day: 'qrmp', sec: 'CGST Rule 61(1)(ii)', src: 'https://taxinformation.cbic.gov.in/content/html/tax_repository/gst/rules/cgst_rules/active/chapter8/rule61_v1.00.html' },
+    { id: 'cmp08', name: 'CMP-08 — composition tax payment', when: 'comp', k: 'q', day: 18, sec: 'CGST Rule 62(1)(i)', src: 'https://taxinformation.cbic.gov.in/content/html/tax_repository/gst/rules/cgst_rules/active/chapter8/rule62_v1.00.html' },
+    { id: 'gstr4', name: 'GSTR-4 — composition annual return', when: 'comp', k: 'y', dates: [['06-30', 1]], sec: 'CGST Rule 62(1)(ii) proviso (30 June from FY 2024-25; was 30 April)', src: 'https://taxinformation.cbic.gov.in/content/html/tax_repository/gst/rules/cgst_rules/active/chapter8/rule62_v1.00.html' },
+    { id: 'gstr9', name: 'GSTR-9 — GST annual return', when: 'gstReg', k: 'y', dates: [['12-31', 1]], sec: 'CGST Rule 80 (ask your CA if optional for your turnover)', src: 'https://tutorial.gst.gov.in/userguide/returns/FAQs_gstr9.htm' },
+    { id: 'tds', name: 'TDS — deposit tax deducted last month', when: 'tds', k: 'm', day: 7, march: '04-30', sec: 'Rule 218 IT Rules 2026 (old Rule 30)', src: 'https://incometaxindia.gov.in/Documents/Tax-Calendar/Payment-of-TDS-and-TCS.htm' },
+    { id: 'tdsret', name: 'TDS return — quarterly statement', when: 'tds', k: 'q', qd: ['07-31', '10-31', '01-31', '05-31'], sec: 'Forms 138/140 (old 24Q/26Q)', src: 'https://cleartax.in/s/tds-payment-due-dates-and-penalties' },
+    { id: 'adv', name: 'Advance tax instalment', when: 'it', k: 'y', dates: [['06-15', 0, '15%'], ['09-15', 0, '45%'], ['12-15', 0, '75%'], ['03-15', 1, '100%']], sec: 'Sec 408 (old 211) — presumptive cases pay all by 15 Mar', src: 'https://www.incometaxindia.gov.in/w/what-are-the-due-dates-for-payment-of-advance-tax-' },
+    { id: 'audit', name: 'Tax audit report', when: 'audit', k: 'y', dates: [['09-30', 1]], sec: 'Sec 63 (old 44AB) — Form 26 from tax year 2026-27', src: 'http://www.incometax.gov.in/iec/foportal/help/all-topics/e-filing-services/%20income%20tax%20forms-faq' },
+    { id: 'itr', name: 'Income-tax return (audit case)', when: 'audit', k: 'y', dates: [['10-31', 1]], sec: 'Sec 263 (old 139(1))', src: 'https://www.incometaxindia.gov.in/documents/81799/11848482/FAQs-on-Interplay-and-Transition.pdf' },
+    { id: 'itrn', name: 'Income-tax return (business, no audit)', when: 'noaudit', k: 'y', dates: [['08-31', 1]], sec: 'Sec 263 (old 139(1)) — 31 July if no business income', src: 'https://www.incometaxindia.gov.in/documents/81799/11848482/FAQs-on-Interplay-and-Transition.pdf' }
+  ]
+};
+// Notified extensions: 'ruleId:periodStart' -> new due date
+const COMP_EXT = {
+  'audit:2025-04-01': ['2026-10-21', 'CBDT Circular 07/2026'],
+  'itr:2025-04-01': ['2026-11-21', 'CBDT Circular 07/2026']
+};
+const QRMP22 = ['22', '23', '24', '25', '26', '27', '29', '30', '31', '32', '33', '34', '35', '36', '37', '28'];
+const CMP_MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const cmpPad = n => String(n).padStart(2, '0');
+const cmpDays = (a, b) => Math.round((new Date(b + 'T00:00:00') - new Date(a + 'T00:00:00')) / 864e5);
+const cmpFyEnd = d => { const s = fyStart(d); return `${+s.slice(0, 4) + 1}-03-31`; };
+function cmpOpts() {
+  const c = S.settings.comp || {};
+  return { mode: taxMode(), qrmp: !!c.qrmp, state: co().state || '27', tds: c.tds !== undefined ? !!c.tds : S.vouchers.some(v => num(v.tds) > 0), audit: !!c.audit };
+}
+function cmpWhen(w, o) {
+  const reg = o.mode === 'regular';
+  return { gstM: reg && !o.qrmp, gstQ: reg && o.qrmp, gstReg: reg, comp: o.mode === 'composition', tds: o.tds, it: true, audit: o.audit, noaudit: !o.audit }[w];
+}
+// all due items whose due date is within [from, to]
+function cmpCalendar(from, to, o = cmpOpts()) {
+  const out = [], done = S.settings.compDone || {};
+  const add = (r, ps, plabel, due, extra) => {
+    const key = `${r.id}:${ps}`, ex = COMP_EXT[key]; if (ex) due = ex[0];
+    if (due < from || due > to) return;
+    out.push({ key, id: r.id, name: r.name + (extra ? ` (${extra})` : ''), period: plabel, due, sec: r.sec, src: r.src, ext: ex ? ex[1] : '', done: !!done[key] });
+  };
+  const y0 = +fyStart(addDays(from, -500)).slice(0, 4), y1 = +fyStart(to).slice(0, 4);
+  for (let y = y0; y <= y1; y++) {
+    for (const r of COMPLIANCE_RULES.due) {
+      if (!cmpWhen(r.when, o)) continue;
+      if (r.k === 'm') for (let i = 0; i < 12; i++) {
+        const m = (3 + i) % 12 + 1, yr = m < 4 ? y + 1 : y; if (r.qm && !r.qm.includes(i % 3)) continue;
+        const nm = m === 12 ? 1 : m + 1, ny = m === 12 ? yr + 1 : yr;
+        const due = r.march && m === 3 ? `${ny}-${r.march}` : `${ny}-${cmpPad(nm)}-${cmpPad(r.day)}`;
+        add(r, `${yr}-${cmpPad(m)}-01`, `${CMP_MON[m - 1]} ${yr}`, due);
+      }
+      else if (r.k === 'q') for (let q = 0; q < 4; q++) {
+        const sm = [4, 7, 10, 1][q], sy = q === 3 ? y + 1 : y, em = sm + 2, dm = em === 12 ? 1 : em + 1, dy = em === 12 ? sy + 1 : sy;
+        let due;
+        if (r.qd) due = `${q >= 2 ? y + 1 : y}-${r.qd[q]}`;
+        else { const d = r.day === 'qrmp' ? (QRMP22.includes(o.state) ? 22 : 24) : r.day; due = `${dy}-${cmpPad(dm)}-${cmpPad(d)}`; }
+        add(r, `${sy}-${cmpPad(sm)}-01`, `${CMP_MON[sm - 1]}–${CMP_MON[em - 1]} ${sy}`, due);
+      }
+      else for (const [md, off, lbl] of r.dates) add(r, `${y}-04-01`, `FY ${y}-${String(y + 1).slice(2)}`, `${y + off}-${md}`, lbl);
+    }
+  }
+  return out.sort((a, b) => a.due.localeCompare(b.due) || a.name.localeCompare(b.name));
+}
+async function cmpToggleDone(key, on) {
+  const d = S.settings.compDone = { ...(S.settings.compDone || {}) };
+  if (on) d[key] = today(); else delete d[key];
+  await saveSettings();
+}
+// overdue (last 60 days, not done) + due in next 7 days
+function cmpAlerts(d = today()) {
+  // overdue looks back 60 days, but not before the first entry in the books (avoids alerts for periods before the app was used)
+  const first = S.vouchers.reduce((m, v) => v.date && v.date < m ? v.date : m, d);
+  const from = first > addDays(d, -60) ? first : addDays(d, -60);
+  const cal = cmpCalendar(from, addDays(d, 7)).filter(x => !x.done);
+  return { overdue: cal.filter(x => x.due < d), soon: cal.filter(x => x.due >= d) };
+}
+
+/* unpaid purchase bills of a supplier as on a date: balance owed is matched to the newest bills (older bills are treated as paid first) */
+function cmpUnpaidPurch(pid, asOf) {
+  let b = 0; try { const lr = ledgerRows(pid, asOf); b = lr[lr.length - 1].bal; } catch (e) { return []; }
+  let rem = r2(-b); const out = []; if (rem <= 0.004) return out;
+  const bills = S.vouchers.filter(v => v.partyId === pid && v.type === 'purchase' && v.date <= asOf).sort((a, c) => c.date.localeCompare(a.date) || (c.createdAt || 0) - (a.createdAt || 0));
+  for (const v of bills) {
+    if (rem <= 0.004) break;
+    const due = r2(num(v.total) - num(v.paid) - num(v.tds)); if (due <= 0.004) continue;
+    const u = r2(Math.min(due, rem)); out.push({ v, unpaid: u }); rem = r2(rem - u);
+  }
+  return out;
+}
+const vItcAmt = v => r2(num(v.cgst) + num(v.sgst) + num(v.igst) + num(v.cess));
+const vItcOn = v => v.type === 'purchase' && v.itc !== false && vMode(v) === 'regular' && !v.rcm && vItcAmt(v) > 0;
+const msmeLimit = p => p.msmeAgree ? Math.min(COMPLIANCE_RULES.msme.maxAgree, num(p.msmeDays) || COMPLIANCE_RULES.msme.maxAgree) : COMPLIANCE_RULES.msme.noAgree;
+function cmpMsme(asOf = today()) {
+  const fs = fyStart(asOf), fe = cmpFyEnd(asOf), rows = [];
+  for (const p of S.parties) {
+    if (!p.msme || p.msmeCat === 'medium') continue;
+    const lim = msmeLimit(p);
+    for (const { v, unpaid } of cmpUnpaidPurch(p.id, asOf)) {
+      const days = cmpDays(v.date, asOf), deadline = addDays(v.date, lim);
+      const expShare = vItcOn(v) && num(v.total) ? r2(unpaid * (num(v.total) - vItcAmt(v)) / num(v.total)) : unpaid;
+      const atRisk = v.date >= fs && deadline <= fe ? expShare : 0;
+      rows.push({ pid: p.id, name: p.name, udyam: p.udyam || '', id: v.id, no: v.billNo || v.no, date: v.date, unpaid, days, limit: lim, deadline, overdue: days > lim, left: lim - days, atRisk, prevFy: v.date < fs });
+    }
+  }
+  rows.sort((a, b) => a.left - b.left);
+  return { rows, fe, atRisk: r2(rows.reduce((s, r) => s + r.atRisk, 0)), overdue: rows.filter(r => r.overdue).length, unpaid: r2(rows.reduce((s, r) => s + r.unpaid, 0)) };
+}
+
+/* cash transactions relevant to the cash limits */
+const isCashAcc = a => a === 'cash' || ledGroup(a) === 'cashg';
+function cmpCashTx(vs = S.vouchers) {
+  const tx = [];
+  const pk = pid => { const p = party(pid); return { key: 'p:' + pid, name: p ? p.name : 'Party', tr: !!(p && p.transporter) }; };
+  for (const v of vs) {
+    const cash = (v.mode || 'Cash') === 'Cash';
+    if ((v.type === 'sale' || v.type === 'dn') && cash && num(v.paid) > 0) tx.push({ vid: v.id, no: v.no, date: v.date, kind: 'rcpt', amt: num(v.paid), ...(v.partyId ? pk(v.partyId) : { key: 'v:' + v.id, name: 'Walk-in customer' }) });
+    else if (v.type === 'payin' && cash) tx.push({ vid: v.id, no: v.no, date: v.date, kind: 'rcpt', amt: num(v.amount), ...(v.partyId ? pk(v.partyId) : { key: 'v:' + v.id, name: 'Unknown' }) });
+    else if (v.type === 'purchase' && cash && num(v.paid) > 0) tx.push({ vid: v.id, no: v.no, date: v.date, kind: 'exp', amt: num(v.paid), ...(v.partyId ? pk(v.partyId) : { key: 'v:' + v.id, name: 'Unknown supplier' }) });
+    else if (v.type === 'payout' && cash) tx.push({ vid: v.id, no: v.no, date: v.date, kind: 'exp', amt: num(v.amount), ...(v.partyId ? pk(v.partyId) : { key: 'v:' + v.id, name: 'Unknown' }) });
+    else if (v.type === 'exp' && cash && !v.pers) {
+      const p = v.tdsParty ? party(v.tdsParty) : null, vn = (v.vendor || '').trim();
+      const who = p ? { key: 'p:' + p.id, name: p.name } : vn ? { key: 'n:' + vn.toLowerCase(), name: vn } : { key: 'v:' + v.id, name: v.category || 'Expense' };
+      tx.push({ vid: v.id, no: v.no, date: v.date, kind: 'exp', amt: r2(num(v.amount) - num(v.tds)), ...who, tr: !!(p && p.transporter) || /freight|transport|cartage|lorry|truck/i.test(v.category || '') });
+    }
+    else if (v.entries) {
+      const net = r2(v.entries.filter(e => isCashAcc(e.a)).reduce((s, e) => s + num(e.dr) - num(e.cr), 0)); if (!net) continue;
+      const side = net < 0 ? 'dr' : 'cr';
+      for (const e of v.entries) {
+        const x = num(e[side]); if (!x || isCashAcc(e.a)) continue;
+        const g = ledGroup(e.a), isP = String(e.a).startsWith('p:');
+        if (g === 'bankg' || g === 'capital') continue;
+        const who = isP ? pk(e.a.slice(2)) : { key: 'v:' + v.id + ':' + e.a, name: ((S.settings.ledgers || []).find(l => l.id === e.a) || {}).name || e.a };
+        const kind = g === 'loans' ? (net < 0 ? 'loanOut' : 'loanIn') : net < 0 ? (isP || ['indexp', 'direxp', 'purg'].includes(g) ? 'exp' : '') : 'rcpt';
+        if (kind) tx.push({ vid: v.id, no: v.no, date: v.date, kind, amt: r2(x), ...who });
+      }
+    }
+  }
+  return tx;
+}
+function cmpCashIssues(from, to, vs) {
+  const R = COMPLIANCE_RULES, tx = cmpCashTx(vs).filter(t => (!from || t.date >= from) && (!to || t.date <= to)), out = [];
+  const grp = kind => { const m = new Map(); tx.filter(t => t.kind === kind).forEach(t => { const k = t.date + '|' + t.key; const g = m.get(k) || { date: t.date, name: t.name, total: 0, tr: true, vids: [], nos: [], max: 0 }; g.total = r2(g.total + t.amt); g.tr = g.tr && !!t.tr; g.vids.push(t.vid); g.nos.push(t.no); g.max = Math.max(g.max, t.amt); m.set(k, g); }); return [...m.values()]; };
+  for (const g of grp('exp')) { const lim = g.tr ? R.cashExp.transporter : R.cashExp.limit; if (g.total > lim) out.push({ ...g, rule: 'exp', limit: lim, sec: R.cashExp.sec, msg: `Cash paid to ${g.name} on ${fd(g.date)} is ${inr(g.total)} — above ${inr(lim)} in a day. This expense may not be allowed for income tax (${R.cashExp.sec}). Pay by bank / UPI.` }); }
+  for (const g of grp('rcpt')) if (g.total >= R.cashRcpt.limit || g.max >= R.cashRcpt.limit) out.push({ ...g, rule: 'rcpt', limit: R.cashRcpt.limit, sec: R.cashRcpt.sec, msg: `Cash received from ${g.name} on ${fd(g.date)} is ${inr(g.total)} — ₹2,00,000 or more. Penalty can equal the amount (${R.cashRcpt.sec}). Take it by bank / UPI.` });
+  for (const t of tx) if ((t.kind === 'loanIn' || t.kind === 'loanOut') && t.amt >= R.cashLoan.limit) { const sec = t.kind === 'loanIn' ? R.cashLoan.secIn : R.cashLoan.secOut; out.push({ date: t.date, name: t.name, total: t.amt, vids: [t.vid], nos: [t.no], rule: t.kind, limit: R.cashLoan.limit, sec, msg: `Loan ${t.kind === 'loanIn' ? 'taken' : 'repaid'} in cash (${t.name}, ${inr(t.amt)} on ${fd(t.date)}) — ₹20,000 or more must go through bank (${sec}).` }); }
+  return out.sort((a, b) => b.date.localeCompare(a.date));
+}
+// warnings for one voucher being saved (others on the same day count too)
+function cashWarnFor(v) {
+  const vs = S.vouchers.filter(x => x.id !== v.id).concat([v]);
+  return cmpCashIssues(v.date, v.date, vs).filter(i => i.vids.includes(v.id)).map(i => i.msg);
+}
+function cmpCashNotice(v) {
+  let m = []; try { m = cashWarnFor(v); } catch (e) { console.warn(e); }
+  const old = $('#cmpWarn'); if (old) old.remove(); if (!m.length) return m;
+  const d = document.createElement('div'); d.id = 'cmpWarn'; d.setAttribute('role', 'alert');
+  d.style.cssText = 'position:fixed;left:10px;right:10px;top:calc(env(safe-area-inset-top,0px) + 62px);z-index:210;background:#fff7ed;border:1px solid #f59e0b;border-radius:12px;padding:10px 34px 10px 12px;font-size:13px;box-shadow:0 6px 20px rgba(0,0,0,.15)';
+  d.innerHTML = `<b>⚠️ Cash limit</b> — saved, but please check:<ul style="margin:6px 0 4px 16px;padding:0">${m.map(x => `<li>${esc(x)}</li>`).join('')}</ul><span class="mu" style="font-size:11.5px">Estimate — confirm with your CA.</span><button aria-label="Close" onclick="this.parentNode.remove()" style="position:absolute;right:6px;top:6px;border:0;background:none;font-size:18px;cursor:pointer">✕</button>`;
+  document.body.appendChild(d); setTimeout(() => { if (d.parentNode) d.remove(); }, 12000);
+  return m;
+}
+
+/* ITC on bills not paid within 180 days */
+function cmpItc180(asOf = today()) {
+  const R = COMPLIANCE_RULES.itc180, rows = [];
+  const sup = new Set(S.vouchers.filter(v => v.type === 'purchase' && v.partyId).map(v => v.partyId));
+  for (const pid of sup) for (const { v, unpaid } of cmpUnpaidPurch(pid, asOf)) {
+    if (!vItcOn(v)) continue; const days = cmpDays(v.date, asOf); if (days <= R.days) continue;
+    const itc = vItcAmt(v), rev = r2(itc * unpaid / num(v.total));
+    rows.push({ pid, name: (party(pid) || {}).name || '', id: v.id, no: v.billNo || v.no, date: v.date, days, unpaid, itc, rev, day180: addDays(v.date, R.days), interest: r2(rev * R.rate / 100 * days / 365) });
+  }
+  rows.sort((a, b) => b.days - a.days);
+  return { rows, rev: r2(rows.reduce((s, r) => s + r.rev, 0)), interest: r2(rows.reduce((s, r) => s + r.interest, 0)) };
+}
+
+/* Home badge */
+function cmpHomeCard() {
+  if (!can('reports')) return '';
+  let A, M; try { A = cmpAlerts(); M = cmpMsme(); } catch (e) { return ''; }
+  const n = A.overdue.length + A.soon.length, mo = M.overdue;
+  if (!n && !mo) return '';
+  const bits = [];
+  if (A.overdue.length) bits.push(`<span class="rd">${A.overdue.length} overdue</span>`);
+  if (A.soon.length) bits.push(`${A.soon.length} due in 7 days`);
+  if (mo) bits.push(`<span class="rd">${mo} MSME bill${mo === 1 ? '' : 's'} past due</span>`);
+  const nx = A.overdue[0] || A.soon[0];
+  return `<div class="card" id="cmpBadge" onclick="go('compliance')" style="cursor:pointer;border-left:4px solid ${A.overdue.length || mo ? '#dc2626' : '#f59e0b'};display:flex;align-items:center;gap:8px">🗓 <div style="flex:1"><b>Compliance</b> · <span id="cmpBadgeN">${bits.join(' · ')}</span>${nx ? `<div class="mu" style="font-size:12.5px">${esc(nx.name)} — ${fd(nx.due)}</div>` : ''}</div></div>`;
+}
+
+/* Screen */
+let CMP_TAB = 'cal', CMP_MONTH = '';
+function vCompliance(q = {}) {
+  if (q.t) CMP_TAB = q.t;
+  hdr('Compliance', { back: true });
+  const tabs = [['cal', 'Due dates'], ['msme', 'MSME 45-day'], ['cash', 'Cash limits'], ['itc', 'ITC 180-day']];
+  const R = COMPLIANCE_RULES, t = today();
+  let body = '';
+  if (CMP_TAB === 'cal') {
+    const o = cmpOpts(), mon = CMP_MONTH || t.slice(0, 7), mf = mon + '-01', mt = iso(new Date(+mon.slice(0, 4), +mon.slice(5, 7), 0));
+    const A = cmpAlerts(), list = cmpCalendar(mf, mt, o);
+    const row = x => `<div class="row" style="cursor:default"><div class="av" style="font-size:11px">${x.due.slice(8)}<br>${CMP_MON[+x.due.slice(5, 7) - 1]}</div><div class="m"><div class="t">${esc(x.name)}</div><div class="s">For ${esc(x.period)} · due ${fd(x.due)}${x.ext ? ` (extended — ${esc(x.ext)})` : ''}${!x.done && x.due < t ? ' · <span class="rd">overdue</span>' : ''}</div><div class="s" style="font-size:11px">${esc(x.sec)}</div></div><label class="ck" style="margin:0"><input type="checkbox" class="cmpDone" data-k="${esc(x.key)}" ${x.done ? 'checked' : ''}> <span>Done</span></label></div>`;
+    const ck = (id, on, lbl) => `<label class="ck"><input type="checkbox" id="${id}" ${on ? 'checked' : ''}> <span>${lbl}</span></label>`;
+    body = `${A.overdue.length + A.soon.length ? `<div class="sect">Overdue & next 7 days</div><div class="list" id="cmpUrgent">${[...A.overdue, ...A.soon].map(row).join('')}</div>` : ''}
+    <div class="card"><div class="f2"><div class="f"><label>Month</label><input type="month" id="cmpMonth" value="${mon}"></div><div class="f"><label>Tax mode</label><div style="padding-top:8px">${TAXMODES.find(x => x[0] === o.mode)[1]}</div></div></div>
+    ${o.mode === 'regular' ? ck('cmpQrmp', o.qrmp, 'I file GST quarterly (QRMP scheme)') : ''}${ck('cmpTds', o.tds, 'I deduct TDS')}${ck('cmpAudit', o.audit, 'My accounts need a tax audit')}</div>
+    <div class="sect">Due in ${CMP_MON[+mon.slice(5, 7) - 1]} ${mon.slice(0, 4)}</div><div class="list" id="cmpList">${list.length ? list.map(row).join('') : emptyBox('✅', 'Nothing due this month')}</div>`;
+  } else if (CMP_TAB === 'msme') {
+    const M = cmpMsme(t);
+    body = `<div class="card" style="font-size:13px">${esc(R.msme.what)}<div class="mu" style="font-size:11.5px;margin-top:4px">${esc(R.msme.sec)}. Mark suppliers as MSME in Party → Edit. Days counted from the bill date.</div></div>
+    <div class="grid2"><div class="stat r"><div class="l">Expense at risk (if unpaid on ${fd(M.fe)})</div><div class="v" id="msmeRisk">${inr(M.atRisk)}</div></div><div class="stat ${M.overdue ? 'r' : ''}"><div class="l">Bills past the limit</div><div class="v" id="msmeOver">${M.overdue}</div></div></div>
+    <div class="list" id="msmeList">${M.rows.length ? M.rows.map(r => `<div class="row" onclick="go('v/${r.id}')"><div class="av">${r.overdue ? '⚠️' : '⏳'}</div><div class="m"><div class="t">${esc(r.name)} · ${esc(r.no)}</div><div class="s">${fd(r.date)} · ${r.days} days · limit ${r.limit} days (pay by ${fd(r.deadline)})${r.prevFy ? ' · last year bill: allowed when paid' : ''}</div>${r.atRisk ? `<div class="s rd">At risk: ${inr(r.atRisk)}</div>` : ''}</div><div class="rt"><div class="a">${inr(r.unpaid)}</div>${r.overdue ? '<span class="tag r">Late</span>' : `<span class="tag w">${r.left}d left</span>`}</div></div>`).join('') : emptyBox('✅', 'No unpaid MSME bills', 'Mark micro / small suppliers in their party details')}</div>`;
+  } else if (CMP_TAB === 'cash') {
+    const fs = fyStart(t), I = cmpCashIssues(fs, t);
+    body = `<div class="card" style="font-size:13px"><div>• ${esc(R.cashExp.what)} <span class="mu">(${esc(R.cashExp.sec)})</span></div><div>• ${esc(R.cashRcpt.what)} <span class="mu">(${esc(R.cashRcpt.sec)})</span></div><div>• ${esc(R.cashLoan.what)} <span class="mu">(${esc(R.cashLoan.secIn)}, ${esc(R.cashLoan.secOut)})</span></div></div>
+    <div class="sect">This financial year (from ${fd(fs)})</div><div class="list" id="cashList">${I.length ? I.map(i => `<div class="row" onclick="go('v/${i.vids[0]}')"><div class="av">⚠️</div><div class="m"><div class="t">${esc(i.name)} · ${fd(i.date)}</div><div class="s">${esc(i.msg)}</div><div class="s" style="font-size:11px">${esc(i.nos.join(', '))}</div></div><div class="rt"><div class="a">${inr(i.total)}</div></div></div>`).join('') : emptyBox('✅', 'No cash-limit issues found')}</div>`;
+  } else {
+    const I = cmpItc180(t);
+    body = `<div class="card" style="font-size:13px">${esc(R.itc180.what)}<div class="mu" style="font-size:11.5px;margin-top:4px">${esc(R.itc180.sec)}. Interest shown is a rough upper estimate at ${R.itc180.rate}% a year from the bill date (due only if the credit was used).</div></div>
+    <div class="grid2"><div class="stat r"><div class="l">GST credit to reverse</div><div class="v" id="itcRev">${inr(I.rev)}</div></div><div class="stat"><div class="l">Interest (estimate)</div><div class="v">${inr(I.interest)}</div></div></div>
+    <div class="list" id="itcList">${I.rows.length ? I.rows.map(r => `<div class="row" onclick="go('v/${r.id}')"><div class="av">↩</div><div class="m"><div class="t">${esc(r.name)} · ${esc(r.no)}</div><div class="s">${fd(r.date)} · ${r.days} days · unpaid ${inr(r.unpaid)} · 180 days on ${fd(r.day180)}</div><div class="s">Reverse in the next GSTR-3B; claim again after you pay.</div></div><div class="rt"><div class="a rd">${inr(r.rev)}</div></div></div>`).join('') : emptyBox('✅', 'No GST credit to reverse', 'Bills with GST credit unpaid for over 180 days show here')}</div>`;
+  }
+  const rulesCard = `<details class="card" id="cmpRules"><summary><b>Limits & dates used</b> <span class="mu" style="font-size:12px">— checked ${fd(COMP_ASOF)}</span></summary><div style="font-size:12.5px;margin-top:8px">
+    <div class="kv"><span>MSME payment</span><span>${R.msme.noAgree} days (no written agreement) / up to ${R.msme.maxAgree} days</span></div>
+    <div class="kv"><span>Cash expense</span><span>above ${inr(R.cashExp.limit)} / ${inr(R.cashExp.transporter)} transporters, per person per day</span></div>
+    <div class="kv"><span>Cash receipt</span><span>${inr(R.cashRcpt.limit)} or more</span></div>
+    <div class="kv"><span>Cash loan / deposit</span><span>${inr(R.cashLoan.limit)} or more</span></div>
+    <div class="kv"><span>GST credit</span><span>${R.itc180.days} days to pay supplier</span></div>
+    ${R.due.map(r => `<div class="kv"><span>${esc(r.name)}</span><a href="${esc(r.src)}" target="_blank" rel="noopener" style="font-size:11.5px">${esc(r.sec)}</a></div>`).join('')}
+    <p class="mu" style="font-size:11.5px">Income-tax sections are from the Income-tax Act 2025 (from 1 Apr 2026), old 1961 numbers in brackets. Due dates can be extended by government notification — check the GST / income-tax portal.</p></div></details>`;
+  $('#main').innerHTML = `<div class="card" id="cmpEst" style="font-size:12.5px;border-left:4px solid #f59e0b">Estimate — confirm with your CA. Rules as of ${fd(COMP_ASOF)}.</div>
+  <div class="seg" id="cmpTabs" style="margin-bottom:10px">${tabs.map(([k, l]) => `<button type="button" data-v="${k}" class="${CMP_TAB === k ? 'on' : ''}" onclick="segPick(this)">${l}</button>`).join('')}</div>${body}${rulesCard}`;
+  $('#cmpTabs').onseg = k => { CMP_TAB = k; vCompliance(); };
+  $$('.cmpDone').forEach(el => { el.onchange = async () => { await cmpToggleDone(el.dataset.k, el.checked); toast(el.checked ? 'Marked done ✓' : 'Marked not done'); vCompliance(); }; });
+  const mi = $('#cmpMonth'); if (mi) mi.onchange = () => { if (/^\d{4}-\d\d$/.test(mi.value)) { CMP_MONTH = mi.value; vCompliance(); } };
+  const setC = (id, k) => { const el = $('#' + id); if (el) el.onchange = async () => { S.settings.comp = { ...(S.settings.comp || {}), [k]: el.checked }; await saveSettings(); vCompliance(); }; };
+  setC('cmpQrmp', 'qrmp'); setC('cmpTds', 'tds'); setC('cmpAudit', 'audit');
+}
 function canV(type) { const r = ROLE(); if (r === 'owner' || r === 'manager') return true; if (r === 'billing') return type === 'sale' || type === 'quote'; return false; }
 function canSeeV(v) { return ROLE() !== 'billing' || !['purchase', 'pret', 'payout', 'exp', ...ACC_T].includes(v.type); }
 function routeAllowed(a, b) {
@@ -3299,6 +3560,7 @@ function routeAllowed(a, b) {
     case 'reports': return can('reports');
     case 'r': return can('reports');
     case 'audit': return can('reports');
+    case 'compliance': return can('reports');
     case 'queries': return can('query');
     default: return true;
   }
