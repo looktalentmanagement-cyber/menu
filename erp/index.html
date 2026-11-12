@@ -638,7 +638,8 @@ function compute() {
     if (t.party) addB(v.partyId, t.party * num(t.lines ? v.total : v.amount));
     let inflow = 0; const pd = num(v.paid);
     if (v.type === 'payin') inflow = num(v.amount);
-    else if (v.type === 'payout' || v.type === 'exp') inflow = -num(v.amount);
+    else if (v.type === 'payout') inflow = -num(v.amount);
+    else if (v.type === 'exp') inflow = -r2(num(v.amount) - num(v.tds));
     else if (t.lines && t.party && pd) { inflow = t.party * pd; addB(v.partyId, -t.party * pd); }
     if (t.lines && t.party && num(v.tds)) addB(v.partyId, -t.party * num(v.tds));
     if (inflow) { if ((v.mode || 'Cash') === 'Cash') cash += inflow; else bank += inflow; }
@@ -1104,6 +1105,44 @@ function vParties(q) {
   <div class="list">${list.length ? list.map(p => partyRow(p, C)).join('') : emptyBox('👥', S.parties.length ? 'No parties in this filter' : 'No parties yet', S.parties.length ? '' : 'Add your customers and suppliers', S.parties.length ? '' : `<button class="btn" onclick="go('partyf/new')">+ Add Party</button>`)}</div>`;
   fabBtn(() => go('partyf/new'));
 }
+/* ================= TDS: PAN, sections, report ================= */
+const PAN_RE = /^[A-Z]{5}[0-9]{4}[A-Z]$/;
+const TDS_SECS = [['', 'None'], ['194C', '194C — Contractors'], ['194J', '194J — Professional / technical fees'], ['194H', '194H — Commission / brokerage'], ['194I', '194I — Rent'], ['194Q', '194Q — Purchase of goods'], ['194A', '194A — Interest'], ['Other', 'Other']];
+function panHint(el) { const x = el.value.trim().toUpperCase(), m = $('#p_panMsg'); if (!m) return; m.textContent = !x ? '' : x.length < 10 ? `${x.length}/10 characters` : PAN_RE.test(x) ? '✓ Valid PAN format' : 'PAN should look like ABCDE1234F'; m.className = x.length === 10 ? (PAN_RE.test(x) ? 'gr' : 'rd') : 'mu'; m.style.fontSize = '12px'; }
+// Section: voucher > party default > expense category hint > 194Q for goods purchase > Other
+function tdsParty(v) { return party(v.type === 'exp' ? v.tdsParty : v.partyId) || null; }
+function tdsSecOf(v) { const p = tdsParty(v); return v.tdsSec || (p && p.tdsSec) || (v.type === 'exp' ? catMeta(v.category || 'Other').tds : '') || (v.type === 'purchase' ? '194Q' : 'Other'); }
+// Deposit due date: 7th of next month; March deductions -> 30 April
+function tdsDue(d) { const y = +d.slice(0, 4), m = +d.slice(5, 7); if (m === 3) return `${y}-04-30`; const ny = m === 12 ? y + 1 : y, nm = m === 12 ? 1 : m + 1; return `${ny}-${String(nm).padStart(2, '0')}-07`; }
+function tdsReport(vs) {
+  const C = (h, n) => ({ h, n: n ? 1 : 0 }), sum = (rows, i) => r2(rows.reduce((s, r) => s + num(r[i]), 0));
+  const pay = vs.filter(v => (v.type === 'purchase' || v.type === 'exp') && num(v.tds) > 0).map(v => { const p = tdsParty(v); return { v, sec: tdsSecOf(v), key: p ? 'p:' + p.id : 'n:' + (v.vendor || v.category || 'Unknown'), name: p ? p.name : (v.vendor || v.category || 'Unknown'), pan: p ? p.pan || '' : '', base: v.type === 'exp' ? r2(num(v.amount) - num(v.gstAmt)) : num(v.taxable), tds: num(v.tds) }; });
+  const bySec = new Map(), byParty = new Map(), byMon = new Map();
+  pay.forEach(x => {
+    const a = bySec.get(x.sec) || [x.sec, 0, 0, 0]; a[1]++; a[2] = r2(a[2] + x.base); a[3] = r2(a[3] + x.tds); bySec.set(x.sec, a);
+    const k = x.sec + '|' + x.key, b = byParty.get(k) || [x.sec, x.name, x.pan || 'Not given', 0, 0]; b[3] = r2(b[3] + x.base); b[4] = r2(b[4] + x.tds); byParty.set(k, b);
+    const mo = x.v.date.slice(0, 7), c = byMon.get(mo) || [mo, 0, 0]; c[1] = r2(c[1] + x.tds); c[2]++; byMon.set(mo, c);
+  });
+  const secRows = [...bySec.values()].sort((a, b) => a[0].localeCompare(b[0]));
+  const partyRows = [...byParty.values()].sort((a, b) => a[0].localeCompare(b[0]) || a[1].localeCompare(b[1]));
+  const lbl = mo => new Date(+mo.slice(0, 4), +mo.slice(5, 7) - 1, 1).toLocaleString('en-IN', { month: 'short', year: 'numeric' });
+  const monRows = [...byMon.values()].sort((a, b) => a[0].localeCompare(b[0])).map(([mo, t, n]) => { const due = tdsDue(mo + '-01'); return [lbl(mo), n, t, fd(due), due < today() ? 'Due date passed — check it was deposited' : 'Upcoming']; });
+  const recM = new Map();
+  vs.filter(v => v.type === 'sale' && num(v.tds) > 0).forEach(v => { const p = party(v.partyId), k = p ? p.id : 'walkin', a = recM.get(k) || [p ? p.name : (v.walkName || 'Walk-in'), p ? p.pan || 'Not given' : '', 0, 0, 0]; a[2]++; a[3] = r2(a[3] + num(v.taxable)); a[4] = r2(a[4] + num(v.tds)); recM.set(k, a); });
+  const recRows = [...recM.values()].sort((a, b) => a[0].localeCompare(b[0]));
+  const payT = sum(secRows, 3), recT = sum(recRows, 4);
+  return {
+    title: 'TDS Summary',
+    cards: [['TDS payable (you deducted)', inr(payT)], ['TDS receivable (deducted on you)', inr(recT)]],
+    sections: [
+      { title: 'Payable — section-wise', key: 'tds_section', csv: 1, cols: [C('Section'), C('Entries', 1), C('Amount paid (excl. GST)', 1), C('TDS', 1)], rows: secRows, total: ['Total', sum(secRows, 1), sum(secRows, 2), payT] },
+      { title: 'Payable — party-wise', key: 'tds_party', csv: 1, cols: [C('Section'), C('Party'), C('PAN'), C('Amount paid (excl. GST)', 1), C('TDS', 1)], rows: partyRows, total: ['Total', '', '', sum(partyRows, 3), sum(partyRows, 4)] },
+      { title: 'Payable — month-wise with deposit due date', key: 'tds_month', csv: 1, cols: [C('Month'), C('Entries', 1), C('TDS', 1), C('Deposit by'), C('Status')], rows: monRows, total: ['Total', sum(monRows, 1), sum(monRows, 2), '', ''] },
+      { title: 'Receivable — TDS deducted by customers', key: 'tds_recv', csv: 1, cols: [C('Customer'), C('PAN'), C('Invoices', 1), C('Sales (taxable)', 1), C('TDS', 1)], rows: recRows, total: ['Total', '', sum(recRows, 2), sum(recRows, 3), recT] }
+    ],
+    note: 'TDS deducted in a month is due by the 7th of the next month (March deductions by 30 April). Match receivable TDS with Form 26AS / AIS. Section numbers shown are the old ones; the Income-tax Act 2025 renumbered them. Confirm with your CA.'
+  };
+}
 function vPartyForm(id, q) {
   const isNew = id === 'new';
   const p = isNew ? { id: uid(), name: q.name || '', kind: q.kind || 'cust', phone: '', gstin: '', state: co().state, address: '', city: '', pin: '', openBal: 0 } : party(id);
@@ -1116,6 +1155,8 @@ function vPartyForm(id, q) {
   <div class="f"><label>Phone (WhatsApp)</label><input id="p_phone" inputmode="tel" value="${esc(p.phone)}" placeholder="98XXXXXXXX"></div>
   <div class="f"><label>GSTIN (leave empty if unregistered)</label><input id="p_gstin" maxlength="15" style="text-transform:uppercase" value="${esc(p.gstin)}" oninput="gstinState(this,'p_state');gstinHint(this)"><div id="p_gstinMsg" class="mu" style="font-size:12px;margin-top:4px"></div></div>
   <div class="f"><label>State</label><select id="p_state">${stateOpts(p.state)}</select></div>
+  <div class="f2"><div class="f"><label>PAN (optional)</label><input id="p_pan" maxlength="10" style="text-transform:uppercase" value="${esc(p.pan || '')}" placeholder="ABCDE1234F" oninput="panHint(this)"><div id="p_panMsg" class="mu" style="font-size:12px;margin-top:4px"></div></div>
+  <div class="f"><label>Default TDS section</label><select id="p_tdsSec">${TDS_SECS.map(([k, l]) => `<option value="${k}" ${(p.tdsSec || '') === k ? 'selected' : ''}>${l}</option>`).join('')}</select></div></div>
   <div class="f"><label>Address</label><textarea id="p_address">${esc(p.address)}</textarea></div>
   <div class="f2"><div class="f"><label>City</label><input id="p_city" value="${esc(p.city || '')}"></div><div class="f"><label>PIN Code</label><input id="p_pin" inputmode="numeric" maxlength="6" value="${esc(p.pin || '')}"></div></div>
   <div class="f"><label>Opening Balance (₹)</label><input id="p_ob" inputmode="decimal" value="${ob ? Math.abs(ob) : ''}" placeholder="0"></div>
@@ -1126,6 +1167,8 @@ function vPartyForm(id, q) {
     const r = { ...p }; r.name = $('#p_name').value.trim(); if (!r.name) return toast('Enter the party name');
     r.kind = segVal('p_kind'); r.phone = $('#p_phone').value.trim(); r.gstin = $('#p_gstin').value.trim().toUpperCase(); r.state = $('#p_state').value; r.address = $('#p_address').value.trim(); r.city = $('#p_city').value.trim(); r.pin = $('#p_pin').value.trim();
     if (r.gstin && gstinErr(r.gstin)) return toast(gstinErr(r.gstin));
+    r.pan = $('#p_pan').value.trim().toUpperCase(); if (r.pan && !PAN_RE.test(r.pan)) return toast('PAN should look like ABCDE1234F (5 letters, 4 digits, 1 letter)'); if (!r.pan) delete r.pan;
+    r.tdsSec = $('#p_tdsSec').value; if (!r.tdsSec) delete r.tdsSec;
     if (r.gstin && r.state !== r.gstin.slice(0, 2)) r.state = r.gstin.slice(0, 2);
     if (r.pin && !/^\d{6}$/.test(r.pin)) return toast('PIN code must be 6 digits');
     const amt = num($('#p_ob').value); r.openBal = segVal('p_obt') === 'p' ? -amt : amt;
@@ -1277,7 +1320,7 @@ function drawVForm() {
   }
   if (v.type !== 'quote') {
     extra += det('tds', 'TDS / TCS <span class="mu" style="font-weight:400;font-size:12.5px">(optional)</span>',
-      `<div class="f2">${v.type === 'sale' || v.type === 'dn' ? fIn(v, 'TCS %', 'tcsRate', { t: 'n', im: 'decimal', id: 'vf_tcs' }) : ''}${fIn(v, v.type === 'purchase' ? 'TDS deducted by us (₹)' : 'TDS deducted by party (₹)', 'tds', { t: 'n', im: 'decimal', id: 'vf_tds' })}</div>`);
+      `<div class="f2">${v.type === 'sale' || v.type === 'dn' ? fIn(v, 'TCS %', 'tcsRate', { t: 'n', im: 'decimal', id: 'vf_tcs' }) : ''}${fIn(v, v.type === 'purchase' ? 'TDS deducted by us (₹)' : 'TDS deducted by party (₹)', 'tds', { t: 'n', im: 'decimal', id: 'vf_tds' })}</div>${v.type === 'purchase' ? fSel(v, 'TDS section', 'tdsSec', [['', `Auto (${tdsSecOf(v)})`], ...TDS_SECS.slice(1)], { id: 'vf_tdsSec' }) : ''}`);
   }
   $('#main').innerHTML = `<div class="card">
     <div class="f2"><div class="f"><label>${v.type === 'quote' ? 'Quotation No' : v.type === 'purchase' ? 'Entry No' : 'Number'}</label><input id="vf_no" value="${esc(v.no)}"></div><div class="f"><label>Date</label><input type="date" id="vf_date" value="${v.date}"></div></div>
@@ -1505,7 +1548,7 @@ function vView(id) {
   } else {
     const rows = [];
     if (v.type === 'payin' || v.type === 'payout') { const p = party(v.partyId); rows.push(['Party', esc(p ? p.name : '-')], ['Amount', `<b>${inr(v.amount)}</b>`], ['Mode', esc(v.mode)], ['Reference', esc(v.ref || '-')]); }
-    if (v.type === 'exp') { const sp = expSplit(v); rows.push(['Category', esc(v.category)], ['Amount', `<b>${inr(v.amount)}</b>`], ['Mode', esc(v.mode)]); if (v.vendor) rows.push(['Vendor', esc(v.vendor)]); if (v.vgstin) rows.push(['Vendor GSTIN', esc(v.vgstin)]); if (sp.gst) rows.push(['GST', inr(sp.gst)], ['GST credit claimable', inr(sp.itc)]); rows.push(['Business / Personal', sp.personal ? 'Personal (Drawings)' : sp.pct < 100 ? `${sp.pct}% business — ${inr(sp.biz)} expense, ${inr(sp.pers)} drawings` : 'Business']); if (v.km) rows.push(['Odometer / km', esc(v.km)]); if (v.photo) rows.push(['Bill photo', `<img id="vw_photo" src="${v.photo}" style="max-width:180px;border-radius:8px" onclick="openOv('<img src=&quot;'+this.src+'&quot; style=&quot;max-width:100%&quot;>',1)">`]); }
+    if (v.type === 'exp') { const sp = expSplit(v); rows.push(['Category', esc(v.category)], ['Amount', `<b>${inr(v.amount)}</b>`], ['Mode', esc(v.mode)]); if (v.vendor) rows.push(['Vendor', esc(v.vendor)]); if (v.vgstin) rows.push(['Vendor GSTIN', esc(v.vgstin)]); if (sp.gst) rows.push(['GST', inr(sp.gst)], ['GST credit claimable', inr(sp.itc)]); if (num(v.tds)) rows.push([`TDS deducted (${tdsSecOf(v)})`, inr(v.tds)], ['Paid to vendor', inr(r2(num(v.amount) - num(v.tds)))]); rows.push(['Business / Personal', sp.personal ? 'Personal (Drawings)' : sp.pct < 100 ? `${sp.pct}% business — ${inr(sp.biz)} expense, ${inr(sp.pers)} drawings` : 'Business']); if (v.km) rows.push(['Odometer / km', esc(v.km)]); if (v.photo) rows.push(['Bill photo', `<img id="vw_photo" src="${v.photo}" style="max-width:180px;border-radius:8px" onclick="openOv('<img src=&quot;'+this.src+'&quot; style=&quot;max-width:100%&quot;>',1)">`]); }
     if (v.entries) { v.entries.forEach(e => rows.push([esc(accName(e.a)), e.dr ? `Dr ${inr(e.dr)}` : `Cr ${inr(e.cr)}`])); if (v.narration) rows.push(['Narration', esc(v.narration)]); }
     if (v.type === 'prod') { const o = item(v.outItem); rows.push(['Produced', `<b>${esc(o ? o.name : '?')}</b> — ${qf(v.outQty)} ${esc(o ? o.unit : '')}`]); (v.lines || []).forEach(l => { const it = item(l.itemId); rows.push(['Used', `${esc(it ? it.name : '?')} — ${qf(l.qty)} ${esc(it ? it.unit : '')}`]); }); }
     rows.unshift(['Date', fd(v.date)], ['No', esc(v.no)]); if (v.note) rows.push(['Note', esc(v.note)]);
@@ -1707,6 +1750,11 @@ function vExpForm(existing) {
   <div class="f"><label>GST amount (₹)</label><input id="ef_gst" inputmode="decimal" value="${v.gstAmt || ''}"></div></div>
   ${gstCo ? `<label class="ck"><input type="checkbox" id="ef_itc"> <span>GST credit (ITC) can be claimed</span></label>` : '<div class="mu" style="font-size:12.5px">GST credit is not available for your registration type — GST becomes part of the expense.</div>'}</div>
   <div class="mu" id="ef_nogst" style="font-size:12.5px">No GST on this category.</div></div>
+  <div class="card"><h3>TDS (optional)</h3>
+  <div class="f"><label>Party (for PAN and TDS section)</label><select id="ef_tdsParty"><option value="">-- None --</option>${S.parties.filter(x => x.kind !== 'cust' || x.id === v.tdsParty).sort((a, b) => a.name.localeCompare(b.name)).map(x => `<option value="${x.id}" ${v.tdsParty === x.id ? 'selected' : ''}>${esc(x.name)}${x.pan ? ' · ' + esc(x.pan) : ''}</option>`).join('')}</select></div>
+  <div class="f2"><div class="f"><label>TDS section</label><select id="ef_tdsSec"></select></div>
+  <div class="f"><label>TDS deducted (₹)</label><input id="ef_tds" inputmode="decimal" value="${num(v.tds) || ''}" placeholder="0"></div></div>
+  <div class="mu" id="ef_tdsMsg" style="font-size:12.5px"></div></div>
   <div class="card">
   <div class="f"><label>Payment mode</label><div class="seg" id="ef_mode">${MODES.map(m => `<button type="button" data-v="${m}" class="${v.mode === m ? 'on' : ''}" onclick="segPick(this)">${m}</button>`).join('')}</div></div>
   <div class="f"><label>Date</label><input type="date" id="ef_date" value="${v.date}"></div>
@@ -1728,8 +1776,11 @@ function vExpForm(existing) {
     if (it) it.disabled = pers;
     $('#ef_hint').textContent = [m.hint, m.tds && !m.hint ? `TDS may apply (old section ${m.tds}).` : '', XCAT.has($c.value.trim()) ? `GST credit: ${ITC_TXT[m.itc]}.` : ''].filter(Boolean).join(' ');
   };
-  $$('.chips .chip', $('#main')).forEach(b => b.onclick = () => { $c.value = b.dataset.c; sync(true); });
-  $c.oninput = () => sync(true);
+  let tdsSecPick = v.tdsSec || '';
+  const syncTds = () => { const tmp = { type: 'exp', category: $c.value.trim(), tdsParty: $('#ef_tdsParty').value }; const auto = tdsSecOf(tmp); $('#ef_tdsSec').innerHTML = [['', `Auto (${auto})`], ...TDS_SECS.slice(1)].map(([k, l]) => `<option value="${k}" ${tdsSecPick === k ? 'selected' : ''}>${l}</option>`).join(''); const t = num($('#ef_tds').value), a = num($('#ef_amount').value); $('#ef_tdsMsg').textContent = t ? `You pay ${inr(r2(a - t))} now; ${inr(t)} goes to TDS Payable (deposit with the government).` : ''; };
+  $('#ef_tdsSec').onchange = () => { tdsSecPick = $('#ef_tdsSec').value; }; $('#ef_tdsParty').onchange = syncTds; $('#ef_tds').oninput = syncTds; $('#ef_amount').addEventListener('input', syncTds);
+  $$('.chips .chip', $('#main')).forEach(b => b.onclick = () => { $c.value = b.dataset.c; sync(true); syncTds(); });
+  $c.oninput = () => { sync(true); syncTds(); };
   $$('button', natSeg).forEach(b => b.onclick = () => { setNat(b.dataset.v); touchedNat = true; sync(false); });
   if ($('#ef_itc')) $('#ef_itc').onchange = () => { touchedItc = true; };
   const g = $('#ef_vgstin'); g.oninput = () => { const x = g.value.trim().toUpperCase(), e = x.length === 15 ? gstinErr(x) : ''; $('#ef_gmsg').textContent = !x ? '' : x.length < 15 ? `${x.length}/15 characters` : e || `✓ Valid GSTIN · ${stateName(x.slice(0, 2))}`; $('#ef_gmsg').className = e ? 'rd' : x.length === 15 ? 'gr' : 'mu'; };
@@ -1737,7 +1788,7 @@ function vExpForm(existing) {
   $('#ef_rate').onchange = autoGst; $('#ef_amount').addEventListener('change', () => { if ($('#ef_rate').value) autoGst(); });
   $('#ef_photo').onchange = async e => { const f = e.target.files[0]; if (!f) return; try { photo = await compressImg(f); pv(); toast(`Photo attached (${dataUrlKB(photo)} KB)`); } catch (er) { toast(er.message); } };
   if ($('#ef_itc') && v.itc !== undefined) $('#ef_itc').checked = !!v.itc;
-  sync(false); if (v.pers !== undefined) setNat(v.pers ? 'pers' : 'biz'); sync(false); pv(); g.oninput();
+  sync(false); if (v.pers !== undefined) setNat(v.pers ? 'pers' : 'biz'); sync(false); pv(); g.oninput(); syncTds();
   savebar(`<button class="btn full" id="ef_save">Save</button>`);
   $('#ef_save').onclick = async () => {
     v.amount = r2(num($('#ef_amount').value)); v.category = $c.value.trim(); v.mode = segVal('ef_mode') || 'Cash'; v.date = $('#ef_date').value || today(); v.note = $('#ef_note').value.trim();
@@ -1749,6 +1800,8 @@ function vExpForm(existing) {
     if (m.veh) v.km = $('#ef_km').value.trim(); else delete v.km;
     if (m.itc === 'na') { v.gstRate = ''; v.gstAmt = 0; v.itc = false; } else { v.gstRate = $('#ef_rate').value; v.gstAmt = r2(num($('#ef_gst').value)); v.itc = gstCo && !!($('#ef_itc') && $('#ef_itc').checked); }
     if (v.gstAmt > v.amount) return toast('GST amount cannot be more than the amount paid');
+    v.tds = r2(num($('#ef_tds').value)); if (v.tds < 0 || v.tds >= v.amount) return toast('TDS must be less than the expense amount'); if (!v.tds) delete v.tds;
+    v.tdsParty = $('#ef_tdsParty').value; if (!v.tdsParty) delete v.tdsParty; v.tdsSec = $('#ef_tdsSec').value; if (!v.tdsSec) delete v.tdsSec;
     if (photo) v.photo = photo; else delete v.photo;
     await saveRec('vouchers', v); await bumpNo('exp', v.no); toast('Expense saved ✓'); replaceTo('exp');
   };
@@ -2005,7 +2058,7 @@ function postings(v) {
   if (v.entries) v.entries.forEach(e => add(e.a, num(e.dr) - num(e.cr)));
   else if (v.type === 'payin') pair(moneyAcc(v.mode), P, num(v.amount));
   else if (v.type === 'payout') pair(P, moneyAcc(v.mode), num(v.amount));
-  else if (v.type === 'exp') { const sp = expSplit(v), M_ = moneyAcc(v.mode); pair(expAcc(v), M_, sp.biz); pair('drawings', M_, sp.pers); if (sp.itc) { if (expInter(v)) pair('in_igst', M_, sp.itc); else { const h = r2(sp.itc / 2); pair('in_cgst', M_, h); pair('in_sgst', M_, r2(sp.itc - h)); } } }
+  else if (v.type === 'exp') { const sp = expSplit(v), M_ = moneyAcc(v.mode); pair(M_, 'tds_pay', num(v.tds)); pair(expAcc(v), M_, sp.biz); pair('drawings', M_, sp.pers); if (sp.itc) { if (expInter(v)) pair('in_igst', M_, sp.itc); else { const h = r2(sp.itc / 2); pair('in_cgst', M_, h); pair('in_sgst', M_, r2(sp.itc - h)); } } }
   else if (t.lines) {
     const d = ['sret', 'cn', 'pret'].includes(v.type) ? -1 : 1;
     const c = num(v.cgst), s = num(v.sgst), i = num(v.igst), x = num(v.cess), tax = r2(c + s + i + x);
@@ -2315,7 +2368,8 @@ const ALL_REPORTS = [
   ['itcexp', '🧾', 'Expense GST Credit', 'GST credit claimable vs blocked on expenses', 'gst'],
   ['perded', '🧍', 'Personal Deductions (for ITR)', 'Health insurance, PPF / ELSS, donations, medical', 'all'],
   ['vehlog', '⛽', 'Vehicle / Petrol Log', 'Fuel and repairs with business use %', 'all'],
-  ['roundoff', '⚖️', 'Round Off Ledger', 'Rounding on every bill', 'all']
+  ['roundoff', '⚖️', 'Round Off Ledger', 'Rounding on every bill', 'all'],
+  ['tds', '🏦', 'TDS Summary', 'TDS you deducted (payable) and TDS deducted on you (receivable)', 'all']
 ];
 const repOk = w => w === 'all' || (w === 'gst' ? isGstCo() : w === taxMode());
 const REPORTS_NOW = () => ALL_REPORTS.filter(r => repOk(r[4]));
@@ -2739,6 +2793,7 @@ function buildReport(name) {
     R.sections.push({ csv: 1, cols: [C_('Date'), C_('Type'), C_('Vendor'), C_('Odometer / km'), C_('Note'), C_('Amount', 1), C_('Business %', 1), C_('Business', 1), C_('Personal', 1)], rows, total: ['Total', '', '', '', '', sumCol(rows, 5), '', sumCol(rows, 7), sumCol(rows, 8)] });
     R.cards = [['Vehicle spend', inr(sumCol(rows, 5))], ['Business share', inr(sumCol(rows, 7))]];
   }
+  if (name === 'tds') Object.assign(R, tdsReport(vs));
   return R;
 }
 function cellH(c, x) { if (c.n && typeof x === 'number') return `<td class="n ${x < 0 ? 'rd' : ''}">${nfa(x)}</td>`; return `<td${c.n ? ' class="n"' : ''}>${esc(x)}</td>`; }
