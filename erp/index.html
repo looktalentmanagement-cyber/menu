@@ -869,6 +869,7 @@ function route() {
       case 'accounts': return vAccounts();
       case 'brs': return vBrs();
       case 'tax': return vTax();
+      case 'gstr2b': return vGstr2b();
       case 'acv': return vAcvForm(b, null);
       case 'settings': return vSettings();
       case 'audit': return vAudit(b);
@@ -1185,7 +1186,7 @@ function exportLedger(id) {
 /* ================= More ================= */
 function vMore() {
   hdr('More', { right: searchBtn() });
-  const m = [['reports', '📊', 'Reports'], ['exp', '💸', 'Expenses'], ['prod', '🏭', 'Production'], ['bill?f=quote', '📝', 'Quotations'], ['bill?f=pay', '💰', 'Payments'], ['bill?f=ret', '↩', 'Returns / CN / DN'], ...(taxMode() === 'regular' ? [['r/gstr1', '📤', 'GSTR-1'], ['r/gstr3b', '🧮', 'GSTR-3B']] : taxMode() === 'composition' ? [['r/cmp08', '🧾', 'CMP-08']] : []), ['r/pl', '📈', 'Profit & Loss'], ['r/bs', '🏛', 'Balance Sheet'], ['accounts', '📚', 'Accounts'], ['r/tb', '⚖️', 'Trial Balance'], ['brs', '🏦', 'Bank Reconciliation'], ['tax', '💡', 'Tax Saving'], ['audit', '🕵', 'Audit Trail'], ...(can('query') ? [['queries', '💬', 'Queries' + (qOpen() ? ` (${qOpen()})` : '')]] : []), ...(caAcct() ? [['clients', '👥', 'My Clients']] : []), ['settings', '⚙️', 'Settings & Backup']];
+  const m = [['reports', '📊', 'Reports'], ['exp', '💸', 'Expenses'], ['prod', '🏭', 'Production'], ['bill?f=quote', '📝', 'Quotations'], ['bill?f=pay', '💰', 'Payments'], ['bill?f=ret', '↩', 'Returns / CN / DN'], ...(taxMode() === 'regular' ? [['r/gstr1', '📤', 'GSTR-1'], ['r/gstr3b', '🧮', 'GSTR-3B'], ...(can('reports') ? [['gstr2b', '📥', 'GSTR-2B Match']] : [])] : taxMode() === 'composition' ? [['r/cmp08', '🧾', 'CMP-08']] : []), ['r/pl', '📈', 'Profit & Loss'], ['r/bs', '🏛', 'Balance Sheet'], ['accounts', '📚', 'Accounts'], ['r/tb', '⚖️', 'Trial Balance'], ['brs', '🏦', 'Bank Reconciliation'], ['tax', '💡', 'Tax Saving'], ['audit', '🕵', 'Audit Trail'], ...(can('query') ? [['queries', '💬', 'Queries' + (qOpen() ? ` (${qOpen()})` : '')]] : []), ...(caAcct() ? [['clients', '👥', 'My Clients']] : []), ['settings', '⚙️', 'Settings & Backup']];
   $('#main').innerHTML = `<div class="mgrid">${m.map(([h, i, l]) => `<button onclick="go('${h}')"><span class="i">${i}</span>${l}</button>`).join('')}</div>
   <div class="card"><h3>New Entry</h3><div class="btns"><button class="btn" onclick="go('new/sale')">+ Sales Invoice</button><button class="btn sec" onclick="go('new/purchase')">+ Purchase Bill</button><button class="btn ghost" onclick="go('new/quote')">+ Quotation</button></div></div>
   <div class="card"><div class="kv"><span>Business</span><b>${esc(co().name)}</b></div><div class="kv"><span>Tax mode</span><span id="moreTax">${TAXMODES.find(x => x[0] === taxMode())[1]}</span></div>${isGstCo() ? `<div class="kv"><span>GSTIN</span><span>${esc(co().gstin || '—')}</span></div>` : ''}<div class="kv"><span>Data</span><span>${S.items.length} items · ${S.parties.length} parties · ${S.vouchers.length} entries</span></div></div>`;
@@ -1204,7 +1205,7 @@ function vVoucherForm(type, existing, q) {
   const route = location.hash;
   if (!F || F.route !== route) {
     const c = co(); let v;
-    const base = () => ({ id: uid(), type, date: today(), partyId: q.party || null, walkName: '', lines: [], notes: '', paid: 0, mode: 'Cash', taxMode: c.taxMode || 'regular', expLut: !!c.lut });
+    const base = () => ({ id: uid(), type, date: /^\d{4}-\d\d-\d\d$/.test(q.date || '') ? q.date : today(), ...(q.bill && type === 'purchase' ? { billNo: q.bill } : {}), partyId: q.party || null, walkName: '', lines: [], notes: '', paid: 0, mode: 'Cash', taxMode: c.taxMode || 'regular', expLut: !!c.lut });
     if (existing) v = clone(existing);
     else if (q.from && vch(q.from)) {
       const src = vch(q.from);
@@ -1700,6 +1701,7 @@ function vExpForm(existing) {
   </div>
   <div class="card"><h3>Vendor &amp; GST</h3>
   <div class="f"><label>Vendor name</label><input id="ef_vendor" value="${esc(v.vendor || '')}" placeholder="Shop / hotel / supplier"></div>
+  <div class="f"><label>Bill No.</label><input id="ef_billNo" value="${esc(v.billNo || '')}" placeholder="Optional — supplier's bill number"></div>
   <div class="f"><label>Vendor GSTIN</label><input id="ef_vgstin" value="${esc(v.vgstin || '')}" maxlength="15" style="text-transform:uppercase" placeholder="Optional"><div id="ef_gmsg" style="font-size:12px"></div></div>
   <div id="ef_gstW"><div class="f2"><div class="f"><label>GST rate %</label><select id="ef_rate"><option value="">--</option>${GSTR.map(r => `<option value="${r}" ${String(v.gstRate) === String(r) ? 'selected' : ''}>${r}%</option>`).join('')}</select></div>
   <div class="f"><label>GST amount (₹)</label><input id="ef_gst" inputmode="decimal" value="${v.gstAmt || ''}"></div></div>
@@ -1742,7 +1744,7 @@ function vExpForm(existing) {
     if (!(v.amount > 0)) return toast('Enter the amount'); if (!v.category) return toast('Select a category');
     const m = catMeta(v.category), gs = g.value.trim().toUpperCase();
     if (gs && gstinErr(gs)) return toast(gstinErr(gs));
-    v.vendor = $('#ef_vendor').value.trim(); v.vgstin = gs; v.pers = segVal('ef_nat') === 'pers';
+    v.vendor = $('#ef_vendor').value.trim(); v.vgstin = gs; v.billNo = $('#ef_billNo').value.trim(); if (!v.billNo) delete v.billNo; v.pers = segVal('ef_nat') === 'pers';
     v.bizPct = m.pct && !v.pers ? Math.min(100, Math.max(0, num($('#ef_pct').value))) : 100;
     if (m.veh) v.km = $('#ef_km').value.trim(); else delete v.km;
     if (m.itc === 'na') { v.gstRate = ''; v.gstAmt = 0; v.itc = false; } else { v.gstRate = $('#ef_rate').value; v.gstAmt = r2(num($('#ef_gst').value)); v.itc = gstCo && !!($('#ef_itc') && $('#ef_itc').checked); }
@@ -1750,6 +1752,98 @@ function vExpForm(existing) {
     if (photo) v.photo = photo; else delete v.photo;
     await saveRec('vouchers', v); await bumpNo('exp', v.no); toast('Expense saved ✓'); replaceTo('exp');
   };
+}
+
+/* ================= GSTR-2B import + ITC reconciliation ================= */
+const B2B = { m: '', rows: null, tab: 'match' };
+const b2Norm = s => String(s || '').toUpperCase().replace(/[\s\/\-]/g, '').replace(/(^|[^0-9])0+(?=\d)/g, '$1');
+const b2Date = s => { const m = /^(\d{1,2})-(\d{1,2})-(\d{4})$/.exec(String(s || '').trim()); return m ? `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}` : String(s || ''); };
+function b2Amt(o) {
+  const src = Array.isArray(o.items) && o.items.length ? o.items : [o], a = { tx: 0, i: 0, c: 0, s: 0, x: 0 };
+  src.forEach(it => { const d = it.itm_det || it; a.tx += num(d.txval); a.i += num(d.igst ?? d.iamt); a.c += num(d.cgst ?? d.camt); a.s += num(d.sgst ?? d.samt); a.x += num(d.cess ?? d.csamt); });
+  Object.keys(a).forEach(k => a[k] = r2(a[k])); return a;
+}
+function b2Parse(j) {
+  const d = (j && j.data && j.data.docdata) || (j && j.docdata) || (j && j.data) || j || {}, out = [];
+  const push = (ctin, trdnm, no, dt, typ, o, sg) => { const a = b2Amt(o); const t = r2(a.i + a.c + a.s + a.x); out.push({ g: String(ctin || '').toUpperCase(), name: trdnm || '', no: String(no || ''), date: b2Date(dt), typ, txv: r2(sg * a.tx), tax: r2(sg * t), itc: String(o.itcavl || 'Y').toUpperCase() === 'N' ? 0 : r2(sg * t), itcavl: o.itcavl || 'Y', rsn: o.rsn || '', val: r2(sg * num(o.val)) }); };
+  (d.b2b || []).forEach(s => (s.inv || []).forEach(v => push(s.ctin, s.trdnm, v.inum, v.dt, 'Invoice', v, 1)));
+  (d.cdnr || []).forEach(s => (s.nt || []).forEach(v => { const cn = String(v.typ || 'C').toUpperCase() === 'C'; push(s.ctin, s.trdnm, v.ntnum, v.dt, cn ? 'Credit note' : 'Debit note', v, cn ? -1 : 1); }));
+  return out;
+}
+function b2Books(m) {
+  const end = monthEnd(m + '-01'), out = [];
+  S.vouchers.forEach(v => {
+    if (!v.date || v.date > end) return;
+    if ((v.type === 'purchase' || v.type === 'pret') && vMode(v) === 'regular' && !v.nonGst) {
+      const p = party(v.partyId), g = p && p.gstin ? p.gstin.toUpperCase() : ''; if (!g) return;
+      const sg = v.type === 'pret' ? -1 : 1, tax = r2(num(v.igst) + num(v.cgst) + num(v.sgst) + num(v.cess));
+      out.push({ id: v.id, g, name: p.name, no: v.billNo || (v.type === 'pret' ? v.ref : '') || v.no, date: v.date, typ: v.type === 'pret' ? 'Purchase return' : 'Purchase bill', txv: r2(sg * num(v.taxable)), tax: r2(sg * tax), itc: v.itc === false ? 0 : r2(sg * tax) });
+    } else if (v.type === 'exp' && v.vgstin) {
+      const sp = expSplit(v); if (!(sp.itc > 0)) return;
+      out.push({ id: v.id, g: String(v.vgstin).toUpperCase(), name: v.vendor || v.category, no: v.billNo || v.no, date: v.date, typ: 'Expense', txv: r2(sp.amount - sp.gst), tax: sp.gst, itc: sp.itc });
+    }
+  });
+  return out;
+}
+function b2Recon(list, m) {
+  const books = b2Books(m), used = new Set(), rows = [], key = r => r.g + '|' + b2Norm(r.no);
+  const idx = new Map(); books.forEach(b => { const k = key(b); if (!idx.has(k)) idx.set(k, []); idx.get(k).push(b); });
+  list.forEach(r => {
+    const c = (idx.get(key(r)) || []).find(b => !used.has(b.id) && Math.sign(b.tax || b.txv) === Math.sign(r.tax || r.txv));
+    if (!c) return rows.push({ st: 'only2b', r, b: null });
+    used.add(c.id);
+    const okA = Math.abs(c.txv - r.txv) <= 1 && Math.abs(c.tax - r.tax) <= 1;
+    rows.push({ st: okA ? 'match' : 'diff', r, b: c });
+  });
+  books.filter(b => !used.has(b.id) && b.date.slice(0, 7) === m).forEach(b => rows.push({ st: 'onlybk', r: null, b }));
+  return rows;
+}
+const B2T = [['match', 'Matched'], ['diff', 'Amount mismatch'], ['only2b', 'In 2B, not in books'], ['onlybk', 'In books, not in 2B (ITC at risk)']];
+function b2Sum(rows) {
+  const s = {}; B2T.forEach(([k]) => s[k] = { n: 0, itc2b: 0, itcBk: 0 });
+  rows.forEach(x => { const t = s[x.st]; t.n++; if (x.r) t.itc2b = r2(t.itc2b + x.r.itc); if (x.b) t.itcBk = r2(t.itcBk + x.b.itc); });
+  return s;
+}
+function b2CSV(rows) {
+  const h = ['Status', 'Supplier GSTIN', 'Supplier', 'Type', '2B Doc No', '2B Date', '2B Taxable', '2B Tax', '2B ITC', 'Books Doc No', 'Books Date', 'Books Taxable', 'Books Tax', 'Books ITC', 'Taxable diff', 'Tax diff'];
+  const L = Object.fromEntries(B2T);
+  return toCSV([h, ...rows.map(({ st, r, b }) => [L[st], (r || b).g, (r || b).name, (r || b).typ, r ? r.no : '', r ? fd(r.date) : '', r ? r.txv : '', r ? r.tax : '', r ? r.itc : '', b ? b.no : '', b ? fd(b.date) : '', b ? b.txv : '', b ? b.tax : '', b ? b.itc : '', r && b ? r2(r.txv - b.txv) : '', r && b ? r2(r.tax - b.tax) : ''])]);
+}
+async function b2Import(text, m) {
+  let j; try { j = JSON.parse(text); } catch (e) { throw new Error('This file is not a valid GSTR-2B JSON file'); }
+  const list = b2Parse(j); if (!list.length) throw new Error('No invoices or notes found in this file');
+  const rows = b2Recon(list, m), s = b2Sum(rows);
+  B2B.m = m; B2B.rows = rows;
+  S.settings.s2b = { month: m, counts: Object.fromEntries(B2T.map(([k]) => [k, s[k].n])), itc: Object.fromEntries(B2T.map(([k]) => [k, { in2b: s[k].itc2b, inBooks: s[k].itcBk }])), at: Date.now() };
+  await saveSettings();
+  return rows;
+}
+function b2Add(i) {
+  const x = B2B.rows && B2B.rows[i]; if (!x || !x.r) return; const r = x.r;
+  if (r.typ !== 'Invoice') return toast(`${r.typ} ${r.no} · ${fd(r.date)} · ${r.name} ${r.g} · tax ${inr(Math.abs(r.tax))}`);
+  const p = S.parties.find(q => (q.gstin || '').toUpperCase() === r.g);
+  if (!p) toast(`Supplier ${r.name || r.g} is not in your parties — pick or add them`);
+  go(`new/purchase?${p ? 'party=' + p.id + '&' : ''}bill=${encodeURIComponent(r.no)}&date=${r.date}`);
+}
+function vGstr2b() {
+  hdr('GSTR-2B Reconciliation', { back: true });
+  const m = B2B.m || (S.settings.s2b && S.settings.s2b.month) || today().slice(0, 7), last = S.settings.s2b;
+  const rows = B2B.rows && B2B.m === m ? B2B.rows : null, s = rows ? b2Sum(rows) : null;
+  const L = Object.fromEntries(B2T), tabRows = rows ? rows.map((x, i) => ({ ...x, i })).filter(x => x.st === B2B.tab) : [];
+  const amt = o => o ? `${esc(o.no)} · ${fd(o.date)}<br>Taxable ${inr(o.txv)} · Tax ${inr(o.tax)} · ITC ${inr(o.itc)}` : '—';
+  $('#main').innerHTML = `<div class="card"><div class="mu" style="font-size:12.5px;margin-bottom:8px">Download your GSTR-2B JSON from the GST portal and pick it here. We match it with your purchase bills and expenses that have a supplier GSTIN and GST credit.</div>
+  <div class="f"><label>Month</label><input type="month" id="b2_m" value="${m}"></div>
+  <div class="f"><label>GSTR-2B file (JSON)</label><input type="file" id="b2_file" accept=".json,application/json"></div>
+  ${last && !rows ? `<div class="mu" style="font-size:12.5px">Last import: ${esc(last.month)} · ${B2T.map(([k, l]) => `${l}: ${last.counts[k] || 0}`).join(' · ')}</div>` : ''}</div>
+  ${rows ? `<div class="chips" id="b2_tabs">${B2T.map(([k, l]) => `<button class="chip ${B2B.tab === k ? 'on' : ''}" data-t="${k}" onclick="B2B.tab='${k}';render()">${l} (${s[k].n})</button>`).join('')}</div>
+  <div class="card" id="b2_tot"><div class="kv"><span>${L[B2B.tab]} — ITC in 2B</span><b id="b2_itc2b">${inr(s[B2B.tab].itc2b)}</b></div><div class="kv"><span>ITC in your books</span><b id="b2_itcbk">${inr(s[B2B.tab].itcBk)}</b></div>
+  <div class="btns"><button class="btn sec sm" id="b2_csv">Export CSV (all rows)</button></div></div>
+  <div class="list" id="b2_list">${tabRows.length ? tabRows.map(x => { const o = x.r || x.b; return `<div class="row b2r" data-st="${x.st}"><div class="m"><div class="t">${esc(o.name || o.g)} <span class="mu" style="font-size:12px">${esc(o.g)} · ${esc(o.typ)}</span></div>
+  ${x.st === 'diff' ? `<div class="s"><b>2B:</b> ${amt(x.r)}</div><div class="s"><b>Books:</b> ${amt(x.b)}</div>` : `<div class="s">${amt(o)}</div>`}${x.r && x.r.itcavl === 'N' ? `<div class="s rd">Portal says ITC not available${x.r.rsn ? ' (' + esc(x.r.rsn) + ')' : ''}</div>` : ''}</div>
+  ${x.st === 'only2b' ? `<button class="btn sm" onclick="b2Add(${x.i})">Add</button>` : x.b ? `<button class="btn ghost sm" onclick="go('v/${x.b.id}')">Open</button>` : ''}</div>`; }).join('') : emptyBox('✓', 'Nothing here')}</div>` : ''}`;
+  $('#b2_m').onchange = e => { B2B.m = e.target.value; render(); };
+  $('#b2_file').onchange = async e => { const f = e.target.files[0]; if (!f) return; try { await b2Import(await f.text(), $('#b2_m').value || m); B2B.tab = 'match'; toast('GSTR-2B matched ✓'); render(); } catch (er) { toast(er.message); } };
+  const c = $('#b2_csv'); if (c) c.onclick = () => download(`GSTR-2B-reconciliation-${m}.csv`, b2CSV(rows), 'text/csv');
 }
 
 /* ================= Tax Saving (estimate) ================= */
@@ -2227,7 +2321,7 @@ const repOk = w => w === 'all' || (w === 'gst' ? isGstCo() : w === taxMode());
 const REPORTS_NOW = () => ALL_REPORTS.filter(r => repOk(r[4]));
 function vReports() {
   hdr('Reports', { back: true });
-  $('#main').innerHTML = `<div class="list">${REPORTS_NOW().map(([k, i, l, s]) => `<div class="row" onclick="go('r/${k}')"><div class="av">${i}</div><div class="m"><div class="t">${l}</div><div class="s">${s}</div></div><span class="mu">›</span></div>`).join('')}</div>`;
+  $('#main').innerHTML = `<div class="list">${REPORTS_NOW().map(([k, i, l, s]) => `<div class="row" onclick="go('r/${k}')"><div class="av">${i}</div><div class="m"><div class="t">${l}</div><div class="s">${s}</div></div><span class="mu">›</span></div>`).join('')}${taxMode() === 'regular' ? `<div class="row" id="rep2b" onclick="go('gstr2b')"><div class="av">📥</div><div class="m"><div class="t">GSTR-2B Reconciliation</div><div class="s">Match portal GSTR-2B with your purchase bills — find ITC at risk</div></div><span class="mu">›</span></div>` : ''}</div>`;
 }
 const inR = v => v.date >= RANGE.from && v.date <= RANGE.to;
 const C_ = (h, n) => ({ h, n: !!n });
@@ -2867,7 +2961,7 @@ function canSeeV(v) { return ROLE() !== 'billing' || !['purchase', 'pret', 'payo
 function routeAllowed(a, b) {
   switch (a) {
     case 'new': case 'pay': case 'acv': return canV(b);
-    case 'accounts': case 'brs': case 'tax': return can('reports');
+    case 'accounts': case 'brs': case 'tax': case 'gstr2b': return can('reports');
     case 'edit': { const v = vch(b); return !v || canV(v.type); }
     case 'v': { const v = vch(b); return !v || canSeeV(v); }
     case 'exp': return b === 'new' ? canV('exp') : can('exp');
