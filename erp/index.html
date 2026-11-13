@@ -233,7 +233,7 @@ const DB = {
 
 /* ================= State ================= */
 const APP = 'LedgerOne', APP_SUB = 'Billing • GST • Accounts', APP_VER = '3.0';
-const S = { settings: null, items: [], parties: [], vouchers: [], audit: [], queries: [] };
+const S = { settings: null, items: [], parties: [], vouchers: [], audit: [], queries: [], pend: [], docs: [] };
 const DEF_CO = () => ({ name: '', address: '', city: '', pin: '', gstin: '', state: '27', phone: '', email: '', prefix: 'INV-', ngPrefix: 'BL-', logo: '', bank: '', terms: 'Goods once sold will not be taken back.', openCash: 0, taxMode: 'regular', compRate: 1, fyNum: true, lut: false, lutNo: '', lutDate: '', turnover: 0, signatory: '' });
 const DEF_SETTINGS = () => ({ setupDone: false, company: DEF_CO(), pin: '', counters: {} });
 let CACHE = null;
@@ -247,7 +247,8 @@ function upgradeSettings(s) {
 async function loadAll() {
   S.settings = upgradeSettings(await DB.get('kv', 'settings'));
   S.items = await DB.all('items'); S.parties = await DB.all('parties');
-  const allV = await DB.all('vouchers'); S.vouchers = allV.filter(v => v.type !== AUD_T && v.type !== QRY_T); S.audit = allV.filter(v => v.type === AUD_T); S.queries = allV.filter(v => v.type === QRY_T);
+  const allV = await DB.all('vouchers'); S.vouchers = allV.filter(v => v.type !== AUD_T && v.type !== QRY_T && !isPend(v)); S.pend = allV.filter(v => v.type !== AUD_T && v.type !== QRY_T && isPend(v)); S.audit = allV.filter(v => v.type === AUD_T); S.queries = allV.filter(v => v.type === QRY_T);
+  try { S.docs = (await DB.get('kv', 'docs')) || []; } catch (e) { S.docs = []; }
   AUD.snap = clone(S.settings); dirty();
   if (DB.name === 'erp-db') { try { if (S.settings.setupDone) localStorage.setItem('erpHome', co().name || 'My business'); else localStorage.removeItem('erpHome'); } catch (e) { } }
 }
@@ -262,21 +263,24 @@ async function saveRec(store, rec) {
   const old = await DB.get(store, rec.id);
   if (store === 'vouchers') { const le = lockErr(rec, old); if (le) { toast(le); throw new Error('locked'); } }
   if (store === 'vouchers' && rec.entries) { const er = acvErr(rec); if (er) { toast(er); throw new Error(er); } }
+  if (store === 'vouchers') mcMark(rec);
   rec.updatedAt = Date.now(); if (!rec.createdAt) rec.createdAt = rec.updatedAt;
   await DB.put(store, rec);
-  const arr = S[store]; const i = arr.findIndex(x => x.id === rec.id);
-  if (i >= 0) arr[i] = rec; else arr.push(rec);
+  if (store === 'vouchers') vPlace(rec);
+  else { const arr = S[store]; const i = arr.findIndex(x => x.id === rec.id); if (i >= 0) arr[i] = rec; else arr.push(rec); }
   dirty(); clPushRec(store, rec);
   if (!old) await audLog('Create', store, rec, audSum(store, rec));
   else { const d = audDiff(old, rec); if (d) await audLog('Edit', store, rec, d); }
+  if (store === 'vouchers' && rec.appr === 'pending' && !(old && old.appr === 'pending')) await audLog('Sent for approval', store, rec, `Amount ${inr(vAmount(rec))} is above the approval limit ${inr(mcCfg().amt)}; kept out of reports until the Owner / Manager approves`);
 }
 async function delRec(store, id) {
   if (clOn() && !can('delete')) { denyToast(); throw new Error('role'); }
-  const old = S[store].find(x => x.id === id) || await DB.get(store, id);
+  const old = S[store].find(x => x.id === id) || (store === 'vouchers' ? S.pend.find(x => x.id === id) : null) || await DB.get(store, id);
   if (!old && store === 'vouchers' && (S.audit.some(a => a.id === id) || S.queries.some(a => a.id === id))) throw new Error('audit');
   if (store === 'vouchers' && old) { if (old.type === AUD_T) throw new Error('audit'); const le = lockErr(old); if (le) { toast(le); throw new Error('locked'); } }
-  await DB.del(store, id); S[store] = S[store].filter(x => x.id !== id); dirty(); clPushDel(store, id);
+  await DB.del(store, id); S[store] = S[store].filter(x => x.id !== id); if (store === 'vouchers') S.pend = S.pend.filter(x => x.id !== id); dirty(); clPushDel(store, id);
   if (old) await audLog('Delete', store, old, audSum(store, old));
+  if (store === 'vouchers' || store === 'parties') await docPurge(store === 'vouchers' ? 'v' : 'p', id);
 }
 
 /* ================= Audit trail (edit log) =================
@@ -286,7 +290,7 @@ async function delRec(store, id) {
 const AUD_T = 'audit';
 const AUD = { snap: null };
 const AUD_RT = { items: 'Item', parties: 'Party', vouchers: 'Voucher' };
-const AUD_SKIP = new Set(['updatedAt', 'createdAt', 'id', 'counters', 'pin', 'taxIn', 'posC', 'setupDone']);
+const AUD_SKIP = new Set(['updatedAt', 'createdAt', 'id', 'counters', 'pin', 'taxIn', 'posC', 'setupDone', 'appr', 'mkBy', 'mkAt', 'apprBy', 'apprAt', 'rejWhy']);
 const AUD_BIG = new Set(['photo', 'img', 'logo', 'company.logo', 'billImg']);
 function audWho() { if (!clOn()) return 'This device'; return (CL.cfg.email || CL.cfg.name || 'User') + ' (' + (ROLES[ROLE()] || ROLE()) + ')'; }
 function audVal(x) { if (x === undefined || x === null || x === '') return '—'; if (typeof x === 'boolean') return x ? 'Yes' : 'No'; if (typeof x === 'number') return String(r2(x)); const t = String(x); return t.length > 40 ? t.slice(0, 37) + '…' : t; }
@@ -410,7 +414,7 @@ function vQueries() {
 window.addEventListener('unhandledrejection', e => { const m = e.reason && e.reason.message; if (m === 'locked' || m === 'role' || m === 'audit') e.preventDefault(); });
 const item = id => S.items.find(x => x.id === id);
 const party = id => S.parties.find(x => x.id === id);
-const vch = id => S.vouchers.find(x => x.id === id);
+const vch = id => S.vouchers.find(x => x.id === id) || S.pend.find(x => x.id === id);
 const co = () => S.settings.company;
 
 /* ================= Utils ================= */
@@ -611,7 +615,7 @@ function docPre(type, date, ng) { const b = type === 'sale' && ng ? (co().ngPref
 function ctrKey(type, date, ng) { const s = type === 'sale' && ng ? 'sale_ng' : type; return co().fyNum && GST_DOC.has(type) ? s + '@' + fyOf(date || today()) : s; }
 function nextNo(type, date, ng) {
   const pre = docPre(type, date, ng); let n = (S.settings.counters[ctrKey(type, date, ng)] || 0) + 1;
-  const used = new Set(S.vouchers.filter(v => v.type === type).map(v => v.no));
+  const used = new Set([...S.vouchers, ...S.pend].filter(v => v.type === type).map(v => v.no));
   while (used.has(pre + n)) n++;
   return pre + n;
 }
@@ -877,6 +881,7 @@ function route() {
       case 'queries': return vQueries();
       case 'compliance': return vCompliance(q);
       case 'fa': return vFa(q);
+      case 'approvals': return vApprovals();
       default: go('home');
     }
   } catch (e) { console.warn(e); $('#main').innerHTML = emptyBox('⚠️', 'Something went wrong', esc(e.message)); }
@@ -956,6 +961,7 @@ function vHome() {
   const recent = [...S.vouchers].sort(vSort).slice(0, 5);
   $('#main').innerHTML = `${ROLE() === 'ca' ? `<div class="card" id="caBanner" style="font-size:13px;border-left:4px solid #6366f1">👔 You are viewing <b>${esc(co().name || 'client')}</b> as Accountant / CA (read-only). <a href="#/clients">Switch client</a><div class="btns" style="margin-top:8px"><button class="btn ghost sm" id="caFull" onclick="fullReportSheet()">🖨 Full Client Report</button><button class="btn ghost sm" id="caXml" onclick="xmlSheet()">📤 Accounting XML export</button></div></div>` : ''}
   ${nq ? `<div class="card" id="qBadge" onclick="go('queries')" style="cursor:pointer;border-left:4px solid #f59e0b;display:flex;align-items:center;gap:8px">💬 <b><span id="qCount">${nq}</span> open question${nq === 1 ? '' : 's'}</b><span class="mu" style="font-size:12.5px">— tap to view and reply</span></div>` : ''}
+  ${mcHomeCard()}
   ${wkHomeCard()}
   ${cmpHomeCard()}
   <div class="search" onclick="go('search')">${ICON.search}<input placeholder="Search party, item, invoice..." readonly onfocus="go('search')"></div>
@@ -987,6 +993,7 @@ function vRow(v) {
   if (v.nonGst) right += '<span class="tag x">Non-GST</span>';
   if (v.type === 'sale' || v.type === 'purchase') { const due = r2(num(v.total) - num(v.paid) - num(v.tds)); right += due <= 0 ? '<span class="tag g">Paid</span>' : (num(v.paid) ? '<span class="tag w">Partial</span>' : (v.partyId ? '<span class="tag r">Unpaid</span>' : '')); }
   if (v.type === 'quote' && v.converted) right += '<span class="tag g">Converted</span>';
+  if (v.appr === 'pending') right += '<span class="tag w">Pending approval</span>'; else if (v.appr === 'rejected') right += '<span class="tag r">Rejected</span>';
   return `<div class="row" onclick="go('v/${v.id}')"><div class="av" style="font-size:11px">${esc((v.no || '').slice(0, 4))}</div><div class="m"><div class="t">${esc(vParty(v) || t.hi)} <span class="tag ${t.tag}">${esc(v.no || '')}</span></div><div class="s">${sub}</div></div><div class="rt">${right}</div></div>`;
 }
 
@@ -1001,7 +1008,7 @@ function vSearch() {
     const C = compute();
     const ps = S.parties.filter(p => (p.name + ' ' + (p.phone || '') + ' ' + (p.gstin || '')).toLowerCase().includes(q)).slice(0, 20);
     const is = S.items.filter(i => (i.name + ' ' + (i.hsn || '') + ' ' + (i.category || '')).toLowerCase().includes(q)).slice(0, 20);
-    const vs = S.vouchers.filter(v => ((v.no || '') + ' ' + (v.billNo || '') + ' ' + vParty(v) + ' ' + (v.note || '') + ' ' + (v.notes || '')).toLowerCase().includes(q)).sort(vSort).slice(0, 30);
+    const vs = [...S.vouchers, ...S.pend].filter(v => ((v.no || '') + ' ' + (v.billNo || '') + ' ' + vParty(v) + ' ' + (v.note || '') + ' ' + (v.notes || '')).toLowerCase().includes(q)).sort(vSort).slice(0, 30);
     let h = '';
     if (ps.length) h += `<div class="sect">Parties</div><div class="list">${ps.map(p => partyRow(p, C)).join('')}</div>`;
     if (is.length) h += `<div class="sect">Items</div><div class="list">${is.map(i => itemRow(i, C)).join('')}</div>`;
@@ -1018,7 +1025,7 @@ function vBills(q) {
   if (q.f) BILLF = q.f;
   hdr('Bills & Entries', { right: searchBtn() });
   const match = v => BILLF === 'all' ? ['sale', 'purchase', 'sret', 'pret', 'cn', 'dn', 'quote', 'payin', 'payout', ...ACC_T].includes(v.type) : BILLF === 'acc' ? ACC_T.includes(v.type) : BILLF === 'ret' ? ['sret', 'pret', 'cn', 'dn'].includes(v.type) : BILLF === 'pay' ? (v.type === 'payin' || v.type === 'payout') : v.type === BILLF;
-  const list = S.vouchers.filter(v => match(v) && canSeeV(v)).sort(vSort);
+  const list = [...S.pend, ...S.vouchers].filter(v => match(v) && canSeeV(v)).sort(vSort);
   const tot = list.reduce((s, v) => s + vAmount(v), 0);
   $('#main').innerHTML = `<div class="chips">${BILL_FILTERS.map(([k, l]) => `<button class="chip ${k === BILLF ? 'on' : ''}" onclick="BILLF='${k}';go('bill?f=${k}')">${l}</button>`).join('')}</div>
   ${BILLF !== 'all' && list.length ? `<div class="mu" style="margin:0 4px 8px;font-size:13px">${list.length} entries · Total ${inr(tot)}</div>` : ''}
@@ -1219,7 +1226,7 @@ function vLedger(id) {
   <div class="sect">Ledger</div>
   <div class="tblw"><table class="t"><thead><tr><th>Detail</th><th class="n">Amount</th><th class="n">Balance</th></tr></thead><tbody>
   ${rows.map(r => `<tr ${r.v ? `onclick="go('v/${r.v.id}')" style="cursor:pointer"` : ''}><td style="white-space:normal">${esc(r.label)}<div class="mu" style="font-size:11.5px">${fd(r.date)}</div></td><td class="n ${r.dr ? 'gr' : 'rd'}">${r.dr ? '+' + nfa(r.dr) : r.cr ? '−' + nfa(r.cr) : ''}</td><td class="n">${nfa(Math.abs(r.bal))} <span class="mu" style="font-size:11px">${r.bal > 0.004 ? 'Dr' : r.bal < -0.004 ? 'Cr' : ''}</span></td></tr>`).join('')}
-  </tbody></table></div><p class="mu" style="font-size:12px;margin:0 4px">+ = debit to party · − = credit to party · Dr = receivable · Cr = payable</p>`;
+  </tbody></table></div><p class="mu" style="font-size:12px;margin:0 4px">+ = debit to party · − = credit to party · Dr = receivable · Cr = payable</p>${docCard('p', p.id)}`;
 }
 function waRemind(id) {
   const p = party(id); const b = compute().bal.get(id) || 0;
@@ -1239,7 +1246,7 @@ function exportLedger(id) {
 /* ================= More ================= */
 function vMore() {
   hdr('More', { right: searchBtn() });
-  const m = [['reports', '📊', 'Reports'], ...(can('reports') ? [['compliance', '🗓', 'Compliance']] : []), ['exp', '💸', 'Expenses'], ['prod', '🏭', 'Production'], ['bill?f=quote', '📝', 'Quotations'], ['bill?f=pay', '💰', 'Payments'], ['bill?f=ret', '↩', 'Returns / CN / DN'], ...(taxMode() === 'regular' ? [['r/gstr1', '📤', 'GSTR-1'], ['r/gstr3b', '🧮', 'GSTR-3B'], ...(can('reports') ? [['gstr2b', '📥', 'GSTR-2B Match']] : [])] : taxMode() === 'composition' ? [['r/cmp08', '🧾', 'CMP-08']] : []), ['r/pl', '📈', 'Profit & Loss'], ['r/bs', '🏛', 'Balance Sheet'], ['accounts', '📚', 'Accounts'], ...(can('reports') ? [['fa', '🏗', 'Fixed Assets']] : []), ['r/tb', '⚖️', 'Trial Balance'], ['brs', '🏦', 'Bank Reconciliation'], ['tax', '💡', 'Tax Saving'], ['audit', '🕵', 'Audit Trail'], ...(can('query') ? [['queries', '💬', 'Queries' + (qOpen() ? ` (${qOpen()})` : '')]] : []), ...(caAcct() ? [['clients', '👥', 'My Clients']] : []), ['settings', '⚙️', 'Settings & Backup']];
+  const m = [['reports', '📊', 'Reports'], ...(can('reports') ? [['compliance', '🗓', 'Compliance']] : []), ['exp', '💸', 'Expenses'], ['prod', '🏭', 'Production'], ['bill?f=quote', '📝', 'Quotations'], ['bill?f=pay', '💰', 'Payments'], ['bill?f=ret', '↩', 'Returns / CN / DN'], ...(taxMode() === 'regular' ? [['r/gstr1', '📤', 'GSTR-1'], ['r/gstr3b', '🧮', 'GSTR-3B'], ...(can('reports') ? [['gstr2b', '📥', 'GSTR-2B Match']] : [])] : taxMode() === 'composition' ? [['r/cmp08', '🧾', 'CMP-08']] : []), ['r/pl', '📈', 'Profit & Loss'], ['r/bs', '🏛', 'Balance Sheet'], ['accounts', '📚', 'Accounts'], ...(can('reports') ? [['fa', '🏗', 'Fixed Assets']] : []), ['r/tb', '⚖️', 'Trial Balance'], ['brs', '🏦', 'Bank Reconciliation'], ['tax', '💡', 'Tax Saving'], ['audit', '🕵', 'Audit Trail'], ...(mcCfg().on || S.pend.length ? [['approvals', '✅', 'Approvals' + (S.pend.filter(v => v.appr === 'pending').length ? ` (${S.pend.filter(v => v.appr === 'pending').length})` : '')]] : []), ...(can('query') ? [['queries', '💬', 'Queries' + (qOpen() ? ` (${qOpen()})` : '')]] : []), ...(caAcct() ? [['clients', '👥', 'My Clients']] : []), ['settings', '⚙️', 'Settings & Backup']];
   $('#main').innerHTML = `<div class="mgrid">${m.map(([h, i, l]) => `<button onclick="go('${h}')"><span class="i">${i}</span>${l}</button>`).join('')}</div>
   <div class="card"><h3>New Entry</h3><div class="btns"><button class="btn" onclick="go('new/sale')">+ Sales Invoice</button><button class="btn sec" onclick="go('new/purchase')">+ Purchase Bill</button><button class="btn ghost" onclick="go('new/quote')">+ Quotation</button></div></div>
   <div class="card"><div class="kv"><span>Business</span><b>${esc(co().name)}</b></div><div class="kv"><span>Tax mode</span><span id="moreTax">${TAXMODES.find(x => x[0] === taxMode())[1]}</span></div>${isGstCo() ? `<div class="kv"><span>GSTIN</span><span>${esc(co().gstin || '—')}</span></div>` : ''}<div class="kv"><span>Data</span><span>${S.items.length} items · ${S.parties.length} parties · ${S.vouchers.length} entries</span></div></div>`;
@@ -1445,7 +1452,7 @@ async function saveVoucher() {
   v.no = (v.no || '').trim(); if (!v.no) return toast('Enter a number');
   if (!v.date) return toast('Select a date');
   { const le = lockErr(v, F.isNew ? null : vch(v.id)); if (le) return toast(le); }
-  if (S.vouchers.some(x => x.id !== v.id && x.type === v.type && x.no === v.no)) return toast(`${v.no} already exists — change the number`);
+  if ([...S.vouchers, ...S.pend].some(x => x.id !== v.id && x.type === v.type && x.no === v.no)) return toast(`${v.no} already exists — change the number`);
   if (GST_DOC.has(v.type) && isGstCo() && (v.no.length > 16 || !/^[A-Za-z0-9\/-]+$/.test(v.no))) return toast('Invoice number: max 16 characters, only letters, digits, / and - (GST rule 46)');
   if (!v.partyId && !WALK_T.includes(v.type)) return toast('Select a party');
   if ((v.type === 'cn' || v.type === 'dn') && !v.refId && !(v.ref || '').trim()) return toast('Select the original invoice');
@@ -1462,7 +1469,7 @@ async function saveVoucher() {
   if (t.stock < 0) { const needs = new Map(); v.lines.forEach(l => needs.set(l.itemId, (needs.get(l.itemId) || 0) + num(l.qty))); const old = F.isNew ? null : vch(v.id); if (!(await stockWarn(needs, old))) return; }
   await saveRec('vouchers', v); await bumpNo(v.type, v.no, v.date, v.type === 'sale' && v.nonGst);
   if (v.fromQuote) { const qv = vch(v.fromQuote); if (qv && qv.converted !== v.id) { qv.converted = v.id; qv.convertedNo = v.no; await saveRec('vouchers', qv); } }
-  toast(`${t.hi} ${v.no} saved ✓`); F = null; replaceTo('v/' + v.id); cmpCashNotice(v);
+  toast(v.appr === 'pending' ? `${t.hi} ${v.no} saved — waiting for approval` : `${t.hi} ${v.no} saved ✓`); F = null; replaceTo('v/' + v.id); cmpCashNotice(v);
 }
 
 /* ================= Voucher view / invoice ================= */
@@ -1568,6 +1575,7 @@ function vView(id) {
   const lk = lockErr(v), hist = S.audit.filter(a => a.rid === v.id).length;
   h = (lk ? `<div class="card" id="lockBanner" style="border-left:4px solid var(--bad)"><b>🔒 Locked period</b><div class="mu" style="font-size:12.5px">Books are locked up to ${fd(lockDt())}. This entry cannot be changed or deleted.</div></div>` : '') + h +
     `<div class="btns" style="margin-top:10px">${can('reports') ? `<button class="btn ghost sm" id="histBtn" onclick="go('audit/${v.id}')">🕓 History (${hist})</button>` : ''}${can('query') ? `<button class="btn ghost sm" id="askBtn" onclick="askSheet('${v.id}')">💬 Ask a question${(() => { const n = S.queries.filter(x => x.ref === v.id && x.status !== 'resolved').length; return n ? ` (${n} open)` : ''; })()}</button>` : ''}</div>`;
+  h = mcBanner(v) + h + docCard('v', v.id);
   $('#main').innerHTML = h;
   const cs = $('#copySel'); if (cs) cs.onchange = () => { const w = $('.inv-wrap'); const k = cs.value; w.innerHTML = invoiceHTML(v, k && k !== 'all' ? COPIES.find(x => x[0] === k)[1] : k === 'all' ? COPIES[0][1] : ''); fitInv(); };
   fitInv();
@@ -3191,6 +3199,7 @@ function vSettings() {
   <p class="mu" style="font-size:12px;margin:0 0 10px">Switching tax mode only affects new bills. Existing bills keep the tax they were created with.</p>
   <button class="btn full" id="s_save">Save Details</button></div>
   ${can('reports') ? `<div class="sect">Weekly Report</div><div class="card"><button class="btn ghost full" id="setWeekly" onclick="weeklySheet()">📊 Weekly report &amp; reminder day (${WK_DAYS[wkDayIdx()]})</button></div>` : ''}
+  ${mcSettingsHTML()}
   <div class="sect">Security</div><div class="card"><div class="kv"><span>App PIN Lock</span><b id="pinState">${S.settings.pin ? 'ON 🔒' : 'OFF'}</b></div>
   <div class="btns" style="margin-top:10px">${S.settings.pin ? `<button class="btn sec" onclick="lockScreen('set1')">Change PIN</button><button class="btn dan" onclick="removePin()">Remove PIN</button>` : `<button class="btn sec" id="setPinBtn" onclick="lockScreen('set1')">Set 4-digit PIN</button>`}</div></div>
   ${lockCardHTML()}
@@ -3215,7 +3224,7 @@ function vSettings() {
   };
 }
 async function backup() {
-  const data = { app: 'erp-pwa', version: 1, exportedAt: new Date().toISOString(), settings: S.settings, items: S.items, parties: S.parties, vouchers: S.vouchers, audit: S.audit, queries: S.queries };
+  const data = { app: 'erp-pwa', version: 1, exportedAt: new Date().toISOString(), settings: S.settings, items: S.items, parties: S.parties, vouchers: [...S.vouchers, ...S.pend], audit: S.audit, queries: S.queries };
   download(`LedgerOne_Backup_${(co().name || 'business').replace(/\W+/g, '_')}_${today()}.json`, JSON.stringify(data), 'application/json');
   toast('Backup is downloading');
 }
@@ -3226,7 +3235,7 @@ function restore(inp) {
     if (!d || d.app !== 'erp-pwa' || !Array.isArray(d.items) || !Array.isArray(d.parties) || !Array.isArray(d.vouchers) || !d.settings) return toast('This is not a LedgerOne backup');
     if (!(await ask(`Restoring will replace all current data with the backup (${d.items.length} items, ${d.parties.length} parties, ${d.vouchers.length} entries). Continue?`, { ok: 'Restore', danger: true }))) { inp.value = ''; return; }
     if (clOn() && !can('restore')) return denyToast();
-    const old = {}; for (const s of SYNC_COLS) old[s] = S[s].map(x => x.id); old.au = new Set(S.audit.map(a => a.id));
+    const old = {}; for (const s of SYNC_COLS) old[s] = S[s].map(x => x.id); old.vouchers.push(...S.pend.map(x => x.id)); old.au = new Set(S.audit.map(a => a.id));
     if (clOn()) { const t = Date.now(); for (const s of SYNC_COLS) d[s].forEach(r => r.updatedAt = t); d.settings.updatedAt = t; d.settings.pin = S.settings.pin || ''; }
     const keepA = new Map(S.audit.map(a => [a.id, a])); (Array.isArray(d.audit) ? d.audit : []).forEach(a => { if (a && a.type === AUD_T && a.id && !keepA.has(a.id)) keepA.set(a.id, a); });
     (Array.isArray(d.queries) ? d.queries : []).forEach(a => { if (a && a.type === QRY_T && a.id && !keepA.has(a.id)) keepA.set(a.id, a); }); S.queries.forEach(a => keepA.set(a.id, a));
@@ -3245,7 +3254,7 @@ async function resetAll() {
   if (!(await ask('All data (items, parties, bills) will be deleted permanently. Have you taken a backup?<br><br>The audit trail is <b>kept</b> — it cannot be deleted, and this deletion will be recorded in it.', { ok: 'Yes, Delete', danger: true }))) return;
   const keepA = [...S.audit, ...S.queries];
   if (!(await ask('Are you sure? This cannot be undone.', { ok: 'Delete', danger: true }))) return;
-  if (clOn()) { if (!can('reset')) return denyToast(); for (const s of SYNC_COLS) for (const r of S[s]) await clPushDel(s, r.id); for (const s of SYNC_COLS) await DB.clear(s); await DB.bulk('vouchers', keepA); const keep = { ...DEF_SETTINGS(), updatedAt: Date.now() }; await DB.put('kv', keep, 'settings'); await loadAll(); await clPushSettings(); await audLog('Delete all data', 'settings', null, 'All items, parties and entries deleted (cloud too)', 'Data', 'All data'); toast('All data deleted (cloud too)'); return replaceTo('home'); }
+  if (clOn()) { if (!can('reset')) return denyToast(); for (const s of SYNC_COLS) for (const r of (s === 'vouchers' ? [...S.vouchers, ...S.pend] : S[s])) await clPushDel(s, r.id); for (const s of SYNC_COLS) await DB.clear(s); await DB.bulk('vouchers', keepA); const keep = { ...DEF_SETTINGS(), updatedAt: Date.now() }; await DB.put('kv', keep, 'settings'); await loadAll(); await clPushSettings(); await audLog('Delete all data', 'settings', null, 'All items, parties and entries deleted (cloud too)', 'Data', 'All data'); toast('All data deleted (cloud too)'); return replaceTo('home'); }
   for (const s of ['items', 'parties', 'vouchers', 'kv']) await DB.clear(s);
   await DB.bulk('vouchers', keepA); await loadAll(); await audLog('Delete all data', 'settings', null, 'All items, parties, entries and settings deleted', 'Data', 'All data'); toast('All data deleted'); replaceTo('home');
 }
@@ -3372,9 +3381,11 @@ function cmpCalendar(from, to, o = cmpOpts()) {
       else for (const [md, off, lbl] of r.dates) add(r, `${y}-04-01`, `FY ${y}-${String(y + 1).slice(2)}`, `${y + off}-${md}`, lbl);
     }
   }
+  out.push(...ntCal(from, to));
   return out.sort((a, b) => a.due.localeCompare(b.due) || a.name.localeCompare(b.name));
 }
 async function cmpToggleDone(key, on) {
+  if (key.startsWith('nt:')) return ntSetStatus(key.slice(3), on ? 'replied' : 'open');
   const d = S.settings.compDone = { ...(S.settings.compDone || {}) };
   if (on) d[key] = today(); else delete d[key];
   await saveSettings();
@@ -3384,7 +3395,7 @@ function cmpAlerts(d = today()) {
   // overdue looks back 60 days, but not before the first entry in the books (avoids alerts for periods before the app was used)
   const first = S.vouchers.reduce((m, v) => v.date && v.date < m ? v.date : m, d);
   const from = first > addDays(d, -60) ? first : addDays(d, -60);
-  const cal = cmpCalendar(from, addDays(d, 7)).filter(x => !x.done);
+  const cal = [...ntCal('2000-01-01', addDays(from, -1)), ...cmpCalendar(from, addDays(d, 7))].filter(x => !x.done);
   return { overdue: cal.filter(x => x.due < d), soon: cal.filter(x => x.due >= d) };
 }
 
@@ -3505,7 +3516,7 @@ let CMP_TAB = 'cal', CMP_MONTH = '';
 function vCompliance(q = {}) {
   if (q.t) CMP_TAB = q.t;
   hdr('Compliance', { back: true });
-  const tabs = [['cal', 'Due dates'], ['msme', 'MSME 45-day'], ['cash', 'Cash limits'], ['itc', 'ITC 180-day'], ['audit', 'Tax audit'], ['firm', 'Partners'], ['q194', 'TDS on purchase'], ['dp', 'Stock statement']];
+  const tabs = [['cal', 'Due dates'], ['notice', 'Notices'], ['late', 'Late fee & interest'], ['msme', 'MSME 45-day'], ['cash', 'Cash limits'], ['itc', 'ITC 180-day'], ['audit', 'Tax audit'], ['firm', 'Partners'], ['q194', 'TDS on purchase'], ['dp', 'Stock statement']];
   const R = COMPLIANCE_RULES, t = today();
   let body = '';
   if (CMP_TAB === 'cal') {
@@ -3528,6 +3539,10 @@ function vCompliance(q = {}) {
     <div class="sect">This financial year (from ${fd(fs)})</div><div class="list" id="cashList">${I.length ? I.map(i => `<div class="row" onclick="go('v/${i.vids[0]}')"><div class="av">⚠️</div><div class="m"><div class="t">${esc(i.name)} · ${fd(i.date)}</div><div class="s">${esc(i.msg)}</div><div class="s" style="font-size:11px">${esc(i.nos.join(', '))}</div></div><div class="rt"><div class="a">${inr(i.total)}</div></div></div>`).join('') : emptyBox('✅', 'No cash-limit issues found')}</div>`;
   } else if (['audit', 'firm', 'q194', 'dp'].includes(CMP_TAB)) {
     body = ca2Body(CMP_TAB);
+  } else if (CMP_TAB === 'notice') {
+    body = ntBody();
+  } else if (CMP_TAB === 'late') {
+    body = lateBody();
   } else {
     const I = cmpItc180(t);
     body = `<div class="card" style="font-size:13px">${esc(R.itc180.what)}<div class="mu" style="font-size:11.5px;margin-top:4px">${esc(R.itc180.sec)}. Interest shown is a rough upper estimate at ${R.itc180.rate}% a year from the bill date (due only if the credit was used).</div></div>
@@ -3546,14 +3561,334 @@ function vCompliance(q = {}) {
     <div class="kv"><span>TDS on purchase of goods</span><a href="${esc(CA2_RULES.q194.src)}" target="_blank" rel="noopener" style="font-size:11.5px">${esc(CA2_RULES.q194.sec)}: 0.1% above ₹50 L, buyer turnover above ₹10 Cr</a></div>
     <div class="kv"><span>TCS on sale of goods</span><a href="${esc(CA2_RULES.tcs1h.src)}" target="_blank" rel="noopener" style="font-size:11.5px">${esc(CA2_RULES.tcs1h.sec)}: withdrawn from 1 Apr 2025</a></div>
     <p class="mu" style="font-size:11.5px">Income-tax sections are from the Income-tax Act 2025 (from 1 Apr 2026), old 1961 numbers in brackets. Due dates can be extended by government notification — check the GST / income-tax portal.</p></div></details>`;
-  $('#main').innerHTML = `<div class="card" id="cmpEst" style="font-size:12.5px;border-left:4px solid #f59e0b">Estimate — confirm with your CA. Rules as of ${fd(COMP_ASOF)}.</div>
+  $('#main').innerHTML = `<div class="card" id="cmpEst" style="font-size:12.5px;border-left:4px solid #f59e0b">${CMP_TAB === 'late' ? 'Estimate. Rules as of 13 Nov 2026, confirm with a CA. Income-tax sections are from the Income-tax Act 2025 with the old 1961 number in brackets.' : `Estimate — confirm with your CA. Rules as of ${fd(COMP_ASOF)}.`}</div>
   <div class="seg wrap" id="cmpTabs" style="margin-bottom:10px">${tabs.map(([k, l]) => `<button type="button" data-v="${k}" class="${CMP_TAB === k ? 'on' : ''}" style="font-size:12.5px;min-height:36px" onclick="segPick(this)">${l}</button>`).join('')}</div>${body}${rulesCard}`;
   $('#cmpTabs').onseg = k => { CMP_TAB = k; vCompliance(); };
   $$('.cmpDone').forEach(el => { el.onchange = async () => { await cmpToggleDone(el.dataset.k, el.checked); toast(el.checked ? 'Marked done ✓' : 'Marked not done'); vCompliance(); }; });
   const mi = $('#cmpMonth'); if (mi) mi.onchange = () => { if (/^\d{4}-\d\d$/.test(mi.value)) { CMP_MONTH = mi.value; vCompliance(); } };
   const setC = (id, k) => { const el = $('#' + id); if (el) el.onchange = async () => { S.settings.comp = { ...(S.settings.comp || {}), [k]: el.checked }; await saveSettings(); vCompliance(); }; };
   setC('cmpQrmp', 'qrmp'); setC('cmpTds', 'tds'); setC('cmpAudit', 'audit');
-  ca2Bind();
+  ca2Bind(); lateBind();
+}
+/* ================= Part I3: document vault, notice tracker, maker-checker, late fee & interest ================= */
+/* ---- Document vault ----
+   Photos / PDFs attached to entries (k 'v'), parties ('p'), fixed assets ('fa') and notices ('nt').
+   Stored on this device only, in the IndexedDB 'kv' store: index under 'docs', each file's data under 'doc:<id>'.
+   Not sent to the cloud and not in the JSON backup (files are too big for the sync database). */
+const DOC_IMG = 300000, DOC_PDF = 2 * 1024 * 1024, DOC_RAW = 20 * 1024 * 1024, DOC_TOTAL = 100 * 1024 * 1024;
+const DOC_KIND = { v: 'Entry', p: 'Party', fa: 'Asset', nt: 'Notice' };
+const docsOf = (k, rid) => (S.docs || []).filter(d => d.k === k && d.rid === rid).sort((a, b) => a.at - b.at);
+const docKB = n => n >= 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(n / 1024)) + ' KB';
+const docBytes = d => { const t = String(d), b = t.length - t.indexOf(',') - 1; return Math.floor(b * 3 / 4) - (t.endsWith('==') ? 2 : t.endsWith('=') ? 1 : 0); };
+const canDoc = () => can('write');
+function docLabel(k, rid) {
+  if (k === 'v') { const v = vch(rid); return v ? audRef('vouchers', v) : 'Entry'; }
+  if (k === 'p') return (party(rid) || {}).name || 'Party';
+  if (k === 'fa') return (faAssets().find(a => a.id === rid) || {}).name || 'Asset';
+  if (k === 'nt') { const n = ntList().find(x => x.id === rid); return n ? `${NT_AUTH[n.auth] || ''} notice ${n.ref || ''}`.trim() : 'Notice'; }
+  return rid;
+}
+function readDataUrl(file) { return new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = () => rej(new Error('Could not read the file')); r.readAsDataURL(file); }); }
+async function docSaveIdx() { await DB.put('kv', S.docs, 'docs'); }
+// returns the saved document, or an error message
+async function docAdd(k, rid, file) {
+  if (!canDoc()) { denyToast(); return 'Not allowed for your role'; }
+  if (!file) return 'Choose a file';
+  const isImg = /^image\//.test(file.type), isPdf = file.type === 'application/pdf' || /\.pdf$/i.test(file.name || '');
+  if (!isImg && !isPdf) return 'Only photos (JPG / PNG) or PDF files can be attached';
+  if (file.size > DOC_RAW) return `File is too big (${docKB(file.size)}). Maximum ${docKB(DOC_RAW)}.`;
+  let data, mime;
+  try {
+    if (isImg) { data = await compressImg(file, DOC_IMG); mime = 'image/jpeg'; }
+    else { if (file.size > DOC_PDF) return `PDF is too big (${docKB(file.size)}). Maximum ${docKB(DOC_PDF)} — scan at a lower resolution or attach photos instead.`; data = await readDataUrl(file); mime = 'application/pdf'; }
+  } catch (e) { return e.message || 'Could not read the file'; }
+  const size = docBytes(data), used = S.docs.reduce((t, d) => t + num(d.size), 0);
+  if (used + size > DOC_TOTAL) return `Document storage is full (${docKB(used)} of ${docKB(DOC_TOTAL)}). Delete old documents first.`;
+  let name = String(file.name || 'document').slice(0, 80); if (isImg && !/\.jpe?g$/i.test(name)) name = name.replace(/\.[^.]*$/, '') + '.jpg';
+  const d = { id: 'd_' + uid(), k, rid, name, mime, size, orig: file.size, at: Date.now(), by: audWho() };
+  await DB.put('kv', data, 'doc:' + d.id); S.docs.push(d); await docSaveIdx();
+  await audLog('Attach', 'docs', null, `${d.name} (${docKB(size)}) attached to ${DOC_KIND[k]}: ${docLabel(k, rid)}`, 'Document', docLabel(k, rid));
+  return d;
+}
+async function docDel(id, sure) {
+  const d = S.docs.find(x => x.id === id); if (!d) return false;
+  if (!canDoc()) { denyToast(); return false; }
+  if (!sure && !(await ask(`Delete <b>${esc(d.name)}</b>? This cannot be undone.`, { ok: 'Delete', danger: true }))) { docRefresh(d.k, d.rid); return false; }
+  await DB.del('kv', 'doc:' + id); S.docs = S.docs.filter(x => x.id !== id); await docSaveIdx();
+  await audLog('Delete', 'docs', null, `${d.name} removed from ${DOC_KIND[d.k]}: ${docLabel(d.k, d.rid)}`, 'Document', docLabel(d.k, d.rid));
+  toast('Document deleted'); docRefresh(d.k, d.rid); return true;
+}
+async function docPurge(k, rid) { const L = docsOf(k, rid); if (!L.length) return; for (const d of L) await DB.del('kv', 'doc:' + d.id); S.docs = S.docs.filter(d => !(d.k === k && d.rid === rid)); await docSaveIdx(); }
+function docBlob(data) { const i = data.indexOf(','), mime = (data.slice(5, i).split(';')[0]) || 'application/octet-stream', bin = atob(data.slice(i + 1)), u = new Uint8Array(bin.length); for (let j = 0; j < bin.length; j++) u[j] = bin.charCodeAt(j); return new Blob([u], { type: mime }); }
+async function docDownload(id) { const d = S.docs.find(x => x.id === id); if (!d) return; const data = await DB.get('kv', 'doc:' + id); if (!data) return toast('File not found on this device'); download(d.name, docBlob(data)); toast('Downloading ' + d.name); }
+async function docOpen(id) { const d = S.docs.find(x => x.id === id); if (!d) return; const data = await DB.get('kv', 'doc:' + id); if (!data) return toast('File not found on this device'); const u = URL.createObjectURL(docBlob(data)); window.open(u, '_blank'); setTimeout(() => URL.revokeObjectURL(u), 60000); }
+async function docView(id) {
+  const d = S.docs.find(x => x.id === id); if (!d) return;
+  const data = await DB.get('kv', 'doc:' + id); if (!data) return toast('File not found on this device');
+  const img = d.mime.startsWith('image/');
+  sheet(esc(d.name), `<div id="docViewer">${img ? `<img id="docImg" src="${data}" alt="${esc(d.name)}" style="width:100%;border-radius:8px;border:1px solid #e5e7eb">` : `<div class="empty" style="padding:18px"><div class="ei">📄</div><b>PDF document</b><p class="mu">${docKB(d.size)}</p><button class="btn sec" id="docOpenBtn" onclick="docOpen('${d.id}')">Open PDF</button></div>`}
+    <div class="mu" style="font-size:12px;margin-top:6px">${docKB(d.size)}${d.orig && d.orig > d.size ? ` (compressed from ${docKB(d.orig)})` : ''} · added ${fd(iso(new Date(d.at)))} · ${esc(d.by || '')}</div></div>`,
+    `<div class="btns"><button class="btn" id="docDl" onclick="docDownload('${d.id}')">⬇ Download</button><button class="btn ghost" id="docClose" onclick="closeOv()">Close</button></div>`);
+  if (d.k === 'fa' || d.k === 'nt') OVCB = () => docRefresh(d.k, d.rid);
+}
+function docRefresh(k, rid) {
+  if (k === 'fa') { if (faAssets().some(a => a.id === rid)) faAssetSheet(rid); return; }
+  if (k === 'nt') { if (ntList().some(n => n.id === rid)) ntSheet(rid); return; }
+  const { parts } = parseHash(); if ((parts[0] === 'v' || parts[0] === 'p') && parts[1] === rid) render();
+}
+async function docPick(inp, k, rid) {
+  const f = inp.files && inp.files[0]; if (!f) return;
+  toast('Attaching...'); const r = await docAdd(k, rid, f); inp.value = '';
+  if (typeof r === 'string') { toast(r); return; }
+  toast(`Attached ✓ ${r.name} (${docKB(r.size)})`); docRefresh(k, rid);
+}
+function docCard(k, rid) {
+  const L = docsOf(k, rid), w = canDoc();
+  if (!L.length && !w) return '';
+  return `<div class="card docs" id="docCard" style="margin-top:10px"><div style="display:flex;justify-content:space-between;align-items:center;gap:8px"><b>📎 Documents (<span id="docN">${L.length}</span>)</b>${w ? `<label class="btn ghost sm" style="margin:0" id="docAddBtn">+ Attach photo / PDF<input type="file" id="docFile" accept="image/*,application/pdf" style="display:none" onchange="docPick(this,'${k}','${esc(rid)}')"></label>` : ''}</div>
+  <div class="list" id="docList" style="margin:8px 0 0">${L.map(d => `<div class="row" data-doc="${d.id}" style="cursor:default"><div class="av">${d.mime.startsWith('image/') ? '🖼' : '📄'}</div><div class="m"><div class="t" style="word-break:break-all">${esc(d.name)}</div><div class="s">${docKB(d.size)} · ${fd(iso(new Date(d.at)))}</div></div><div class="rt" style="display:flex;gap:4px"><button class="btn sec sm docV" onclick="docView('${d.id}')">View</button>${w ? `<button class="btn ghost sm docD" aria-label="Delete" onclick="docDel('${d.id}')">🗑</button>` : ''}</div></div>`).join('')}</div>
+  <div class="mu" style="font-size:11.5px;margin-top:6px">Kept on this phone only (not in the cloud or the backup file). Photos are compressed; PDF up to ${docKB(DOC_PDF)}.</div></div>`;
+}
+
+/* ---- Notice tracker (GST / income-tax / TDS notices) — stored in settings.notices, so it syncs with the cloud and every change is in the audit trail ---- */
+const NT_AUTH = { gst: 'GST', it: 'Income-tax', tds: 'TDS' };
+const NT_ST = { open: 'Open — reply pending', replied: 'Replied', closed: 'Closed' };
+const ntList = () => (S.settings && S.settings.notices) || [];
+const canNt = () => ['owner', 'manager'].includes(ROLE());
+let NT_F = 'open';
+function ntErr(n) {
+  if (!NT_AUTH[n.auth]) return 'Select the department';
+  if (!n.recv) return 'Enter the date received';
+  if (n.due && n.due < n.recv) return 'Reply due date cannot be before the date received';
+  if (!NT_ST[n.status]) return 'Select a status';
+  return '';
+}
+async function ntSave(n) {
+  if (!canNt()) { denyToast(); return 'Not allowed for your role'; }
+  const e = ntErr(n); if (e) return e;
+  const o = { id: n.id || 'nt_' + uid(), auth: n.auth, authority: String(n.authority || '').trim(), sec: String(n.sec || '').trim(), ref: String(n.ref || '').trim(), period: String(n.period || '').trim(), recv: n.recv, due: n.due || '', status: n.status, amt: r2(num(n.amt)), note: String(n.note || '').trim(), name: `${NT_AUTH[n.auth]} notice ${String(n.ref || n.sec || '').trim()}`.trim() };
+  const L = ntList().filter(x => x.id !== o.id); L.push(o); L.sort((a, b) => (a.due || '9').localeCompare(b.due || '9'));
+  S.settings.notices = L; await saveSettings(); return o;
+}
+async function ntSetStatus(id, st) { const n = ntList().find(x => x.id === id); if (!n) return; const r = await ntSave({ ...n, status: st }); if (typeof r === 'string') toast(r); }
+async function ntDel(id) {
+  if (!canNt()) return denyToast();
+  const n = ntList().find(x => x.id === id); if (!n) return;
+  if (!(await ask(`Delete this ${NT_AUTH[n.auth]} notice${n.ref ? ' (' + esc(n.ref) + ')' : ''} and its attached documents?`, { ok: 'Delete', danger: true }))) return ntSheet(id);
+  S.settings.notices = ntList().filter(x => x.id !== id); await saveSettings(); await docPurge('nt', id); toast('Notice deleted'); if (parseHash().parts[0] === 'compliance') vCompliance();
+}
+function ntRow(n, t = today()) {
+  const left = n.due ? cmpDays(t, n.due) : null, open = n.status === 'open';
+  const dl = !n.due ? 'no reply date' : !open ? 'reply due ' + fd(n.due) : left < 0 ? `<span class="rd">reply overdue by ${-left} day${left === -1 ? '' : 's'}</span>` : left === 0 ? '<span class="rd">reply due today</span>' : `reply due ${fd(n.due)} (${left} day${left === 1 ? '' : 's'} left)`;
+  const nd = docsOf('nt', n.id).length;
+  return `<div class="row" data-nt="${n.id}" onclick="ntSheet('${n.id}')"><div class="av">${n.auth === 'gst' ? 'GST' : n.auth === 'tds' ? 'TDS' : 'IT'}</div><div class="m"><div class="t">${esc(n.sec || 'Notice')}${n.ref ? ' · ' + esc(n.ref) : ''}</div><div class="s">${dl}${nd ? ` · 📎 ${nd}` : ''}</div><div class="s">${esc(n.authority || NT_AUTH[n.auth])} · received ${fd(n.recv)}</div></div><div class="rt">${num(n.amt) ? `<div class="a">${inr(n.amt)}</div>` : ''}<span class="tag ${n.status === 'open' ? (left !== null && left < 0 ? 'r' : 'w') : 'g'}">${n.status === 'open' ? 'Open' : n.status === 'replied' ? 'Replied' : 'Closed'}</span></div></div>`;
+}
+// open / done notices as calendar items (reply due date in [from, to])
+function ntCal(from, to) {
+  return ntList().filter(n => n.due && n.due >= from && n.due <= to).map(n => ({ key: 'nt:' + n.id, id: 'notice', nt: n.id, name: `Reply to ${NT_AUTH[n.auth] || 'tax'} notice${n.sec ? ' — ' + n.sec : ''}`, period: (n.ref ? n.ref + ', ' : '') + 'received ' + fd(n.recv), due: n.due, sec: n.authority || '', src: '', ext: '', done: n.status !== 'open' }));
+}
+function ntBody() {
+  const L = ntList(), t = today(), open = L.filter(n => n.status === 'open'), od = open.filter(n => n.due && n.due < t).length;
+  const show = L.filter(n => NT_F === 'all' || (NT_F === 'open' ? n.status === 'open' : n.status !== 'open'));
+  return `<div class="card" style="font-size:13px">Keep every GST / income-tax / TDS notice here with its reply due date and papers. Open notices appear in the Due dates calendar and on the home screen when the reply is due within 7 days or overdue.</div>
+  <div class="grid2"><div class="stat ${od ? 'r' : ''}"><div class="l">Open notices</div><div class="v" id="ntOpen">${open.length}</div></div><div class="stat ${od ? 'r' : ''}"><div class="l">Reply overdue</div><div class="v" id="ntOver">${od}</div></div></div>
+  <div class="seg" id="ntF" style="margin:10px 0">${[['open', 'Open'], ['done', 'Replied / closed'], ['all', 'All']].map(([k, l]) => `<button type="button" data-v="${k}" class="${NT_F === k ? 'on' : ''}" onclick="NT_F='${k}';vCompliance()">${l}</button>`).join('')}</div>
+  ${canNt() ? `<button class="btn full" id="ntAdd" style="margin-bottom:10px" onclick="ntSheet('')">+ Add notice</button>` : ''}
+  <div class="list" id="ntList">${show.length ? show.map(n => ntRow(n, t)).join('') : emptyBox('📨', 'No notices here', '<p class="mu">Add a notice when it arrives so its reply date is not missed.</p>')}</div>`;
+}
+function ntSheet(id) {
+  const n = { auth: 'gst', status: 'open', recv: today(), ...(ntList().find(x => x.id === id) || {}) }, ro = !canNt();
+  const f = (k, lab, x = {}) => `<div class="f"><label>${lab}</label><input id="nt_${k}" ${x.t ? `type="${x.t}"` : ''} ${x.n ? 'inputmode="decimal"' : ''} value="${esc(n[k] == null ? '' : n[k])}" placeholder="${x.ph || ''}" ${ro ? 'disabled' : ''}></div>`;
+  sheet(id ? 'Notice' : 'Add notice', `<div class="f"><label>Department *</label><select id="nt_auth" ${ro ? 'disabled' : ''}>${Object.entries(NT_AUTH).map(([k, l]) => `<option value="${k}" ${n.auth === k ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
+    ${f('authority', 'Issued by (office / officer)', { ph: 'e.g. State Tax Officer, Ward 12, Nashik' })}
+    <div class="f2">${f('sec', 'Section / form', { ph: 'e.g. Sec 73, ASMT-10, Sec 270 (old 148)' })}${f('ref', 'Notice no. / DIN', { ph: 'Reference no.' })}</div>
+    <div class="f2">${f('recv', 'Date received *', { t: 'date' })}${f('due', 'Reply due date', { t: 'date' })}</div>
+    <div class="f2">${f('period', 'Period / year', { ph: 'e.g. FY 2024-25' })}${f('amt', 'Demand (₹)', { n: 1, ph: '0' })}</div>
+    <div class="f"><label>Status</label><select id="nt_status" ${ro ? 'disabled' : ''}>${Object.entries(NT_ST).map(([k, l]) => `<option value="${k}" ${n.status === k ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
+    <div class="f"><label>Notes</label><textarea id="nt_note" ${ro ? 'disabled' : ''} placeholder="What is asked, who is handling the reply">${esc(n.note || '')}</textarea></div>
+    ${id ? docCard('nt', id) : '<p class="mu" style="font-size:12px">Save the notice first, then attach the notice copy and your reply.</p>'}`,
+    ro ? '' : `<div class="btns">${id ? `<button class="btn dan" id="nt_del" onclick="ntDel('${id}')">Delete</button>` : ''}<button class="btn" id="nt_save" style="flex:1">Save Notice</button></div>`);
+  const sv = $('#nt_save'); if (sv) sv.onclick = async () => {
+    const o = { id }; ['auth', 'authority', 'sec', 'ref', 'recv', 'due', 'period', 'amt', 'status', 'note'].forEach(k => { const el = $('#nt_' + k); if (el) o[k] = el.value; });
+    const r = await ntSave(o); if (typeof r === 'string') return toast(r);
+    closeOv(); toast(id ? 'Notice saved ✓' : 'Notice added ✓ — attach the notice copy now'); if (parseHash().parts[0] === 'compliance') vCompliance(); if (!id) ntSheet(r.id);
+  };
+}
+
+/* ---- Maker-checker: Billing Staff entries above a limit wait for Owner / Manager approval ----
+   Pending / rejected entries are kept in S.pend (not S.vouchers), so no report, stock, ledger or return sees them until approved. */
+const isPend = v => !!v && (v.appr === 'pending' || v.appr === 'rejected');
+const mcCfg = () => ({ on: false, amt: 50000, ...((S.settings && S.settings.mc) || {}) });
+const canAppr = () => ['owner', 'manager'].includes(ROLE());
+function mcNeeds(v) { const c = mcCfg(); return c.on && ROLE() === 'billing' && v.type !== 'quote' && vAmount(v) > num(c.amt); }
+function mcMark(v) {
+  if (mcNeeds(v)) { v.appr = 'pending'; v.mkBy = audWho(); v.mkAt = Date.now(); delete v.apprBy; delete v.apprAt; delete v.rejWhy; }
+  else if (ROLE() === 'billing' && isPend(v)) { delete v.appr; delete v.rejWhy; }
+}
+function vPlace(rec) {
+  const into = isPend(rec) ? S.pend : S.vouchers, other = isPend(rec) ? S.vouchers : S.pend;
+  const j = other.findIndex(x => x.id === rec.id); if (j >= 0) other.splice(j, 1);
+  const i = into.findIndex(x => x.id === rec.id); if (i >= 0) into[i] = rec; else into.push(rec);
+}
+async function mcDecide(id, ok, why) {
+  if (!canAppr()) { denyToast(); return 'Not allowed for your role'; }
+  const v = S.pend.find(x => x.id === id); if (!v) return 'Entry is not waiting for approval';
+  const r = clone(v); r.appr = ok ? 'ok' : 'rejected'; r.apprBy = audWho(); r.apprAt = Date.now();
+  if (ok) delete r.rejWhy; else r.rejWhy = String(why || '').trim();
+  await saveRec('vouchers', r);
+  await audLog(ok ? 'Approve' : 'Reject', 'vouchers', r, ok ? `Approved ${inr(vAmount(r))} (made by ${r.mkBy || '—'}); now included in reports` : `Rejected${r.rejWhy ? ': ' + r.rejWhy : ''} (made by ${r.mkBy || '—'}); stays out of reports`);
+  return true;
+}
+async function mcApproveUI(id) { const r = await mcDecide(id, true); if (r !== true) return toast(r); toast('Approved ✓ — now in reports'); render(); }
+async function mcRejectUI(id) {
+  sheet('Reject entry', `<div class="f"><label>Reason (shown to the staff member)</label><textarea id="mc_why" placeholder="e.g. Rate is wrong, please correct"></textarea></div>`, `<button class="btn dan full" id="mc_rej">Reject</button>`);
+  $('#mc_rej').onclick = async () => { const r = await mcDecide(id, false, $('#mc_why').value); if (r !== true) return toast(r); closeOv(); toast('Rejected'); render(); };
+}
+function mcBanner(v) {
+  if (!isPend(v)) return v.appr === 'ok' && v.apprBy ? `<div class="mu" id="mcOk" style="font-size:12px;margin:0 4px 8px">✅ Approved by ${esc(v.apprBy)}</div>` : '';
+  const pend = v.appr === 'pending';
+  return `<div class="card" id="mcBanner" style="border-left:4px solid ${pend ? '#f59e0b' : 'var(--bad)'}"><b>${pend ? '⏳ Pending approval' : '✖ Rejected'}</b><div class="mu" style="font-size:12.5px">Made by ${esc(v.mkBy || '—')}${pend ? '' : ` · rejected by ${esc(v.apprBy || '—')}${v.rejWhy ? ': ' + esc(v.rejWhy) : ''}`}. Not included in reports, stock or party balances until approved.</div>
+  ${canAppr() ? `<div class="btns" style="margin-top:8px"><button class="btn ok sm" id="mcApprove" onclick="mcApproveUI('${v.id}')">✓ Approve</button>${pend ? `<button class="btn dan sm" id="mcReject" onclick="mcRejectUI('${v.id}')">✖ Reject</button>` : ''}</div>` : (ROLE() === 'billing' && !pend ? '<div class="mu" style="font-size:12px;margin-top:4px">Edit and save to send it for approval again.</div>' : '')}</div>`;
+}
+function mcHomeCard() {
+  const n = S.pend.filter(v => v.appr === 'pending').length, rj = S.pend.filter(v => v.appr === 'rejected').length;
+  if (!n && !(rj && ROLE() === 'billing')) return '';
+  return `<div class="card" id="mcBadge" onclick="go('approvals')" style="cursor:pointer;border-left:4px solid #f59e0b;display:flex;align-items:center;gap:8px">✅ <div style="flex:1"><b><span id="mcCount">${n}</span> ${n === 1 ? 'entry' : 'entries'} waiting for approval</b>${rj ? ` · ${rj} rejected` : ''}<div class="mu" style="font-size:12.5px">${canAppr() ? 'Tap to approve or reject' : 'The Owner / Manager will approve'}</div></div></div>`;
+}
+function vApprovals() {
+  hdr('Approvals', { back: true });
+  const c = mcCfg(), L = [...S.pend].sort((a, b) => (a.appr === b.appr ? 0 : a.appr === 'pending' ? -1 : 1) || vSort(a, b));
+  $('#main').innerHTML = `<div class="card" style="font-size:13px">${c.on ? `Billing Staff entries above <b>${inr(c.amt)}</b> wait here until the Owner or a Manager approves them. Until then they are not in reports, stock or party balances.` : 'Approval is switched off in Settings. Entries below were made while it was on.'}</div>
+  <div class="list" id="mcList">${L.length ? L.map(v => `<div class="mcR">${vRow(v)}${canAppr() && v.appr === 'pending' ? `<div class="btns" style="margin:-4px 0 10px"><button class="btn ok sm" onclick="mcApproveUI('${v.id}')">✓ Approve</button><button class="btn dan sm" onclick="mcRejectUI('${v.id}')">✖ Reject</button></div>` : ''}</div>`).join('') : emptyBox('✅', 'Nothing waiting', '<p class="mu">All entries are approved.</p>')}</div>`;
+}
+function mcSettingsHTML() {
+  const c = mcCfg(), own = can('company');
+  if (!own && !c.on) return '';
+  return `<div class="sect">Approval (maker-checker)</div><div class="card" id="mcCard">
+  ${own ? `<label class="ck"><input type="checkbox" id="mc_on" ${c.on ? 'checked' : ''}> <span>Billing Staff entries above a limit need Owner / Manager approval</span></label>
+  <div class="f"><label>Approval needed above (₹, bill total)</label><input id="mc_amt" inputmode="decimal" value="${num(c.amt)}"></div>
+  <button class="btn sec full" id="mc_save" onclick="mcSave()">Save Approval Setting</button>` : `<div class="kv"><span>Approval needed above</span><b>${inr(c.amt)}</b></div>`}
+  <p class="mu" style="font-size:12px;margin:8px 0 0">Waiting entries are kept out of reports until approved. Every approval or rejection is recorded in the audit trail.</p></div>`;
+}
+async function mcSave(on, amt) {
+  if (!can('company')) return denyToast();
+  if (on === undefined) { on = $('#mc_on').checked; amt = $('#mc_amt').value; }
+  amt = num(amt); if (on && !(amt > 0)) return toast('Enter the amount above which approval is needed');
+  S.settings.mc = { on: !!on, amt: amt || 50000 }; await saveSettings(); toast(on ? `Approval on — above ${inr(amt)} ✓` : 'Approval switched off'); if (parseHash().parts[0] === 'settings') render();
+}
+
+/* ---- Late fee & interest calculator ----
+   Editable rule table, checked 13 Nov 2026 against the sources shown. Owners can override any figure in the app (settings.lateRules).
+   Income-tax Act 2025 numbers, old 1961 Act numbers in brackets. Estimate — confirm with a CA. */
+const LATE_ASOF = '2026-11-13';
+const LATE_RULES = {
+  gstFee: { perDay: 50, nilPerDay: 20, nilCap: 500, cap1: 2000, cap2: 5000, cap3: 10000, slab1: 15000000, slab2: 50000000,
+    sec: 'CGST sec 47; caps by Notification 19/2021-CT (GSTR-3B) and 20/2021-CT (GSTR-1), from June 2021',
+    what: 'GSTR-1 / GSTR-3B filed late: ₹50 a day (₹20 for a nil return), CGST + SGST together, from the day after the due date to the filing date. Maximum per return: nil ₹500; turnover last year up to ₹1.5 Cr ₹2,000; ₹1.5–5 Cr ₹5,000; above ₹5 Cr ₹10,000.',
+    src: 'https://gstcouncil.gov.in/sites/default/files/2024-05/notfctn-19-central-tax-english-2021.pdf', src2: 'https://kcshah.com/blog-late-filing-penalties-fy2627' },
+  gstInt: { rate: 18, itcRate: 18, itcMax: 24,
+    sec: 'CGST sec 50(1) and 50(3) with Rule 88B',
+    what: 'Tax paid late: 18% a year on the tax paid in cash, for the days of delay. Credit (ITC) wrongly taken and used: the Act allows up to 24%, but the rate notified is 18% (Finance Act 2022, from 1 July 2017), from the date it was used to the date it was reversed.',
+    src: 'https://taxinformation.cbic.gov.in/content/html/tax_repository/gst/acts/2017_CGST_act/active/chapter10/section50_v1.00.html', src2: 'https://ksmg.co/explainers/gst-input-tax-credit/wrongly-availed' },
+  tdsFee: { perDay: 200,
+    sec: 'Sec 427 (old 234E)',
+    what: 'TDS / TCS statement filed late: ₹200 a day from the day after the due date until it is filed, but not more than the TDS in that statement. Pay it before filing.',
+    src: 'https://kcshah.com/blog-late-filing-penalties-fy2627', src2: 'https://incometaxindia.gov.in/w/late-filing-fees-and-penalty-for-failure-to-furnish/delay-in-furnishing-the-tds/tcs-statements%E2%80%8B' },
+  tdsInt: { notDed: 1, latePay: 1.5,
+    sec: 'Sec 398(3)(a) (old 201(1A))',
+    what: 'TDS not deducted on time: 1% a month from the date it should have been deducted to the date deducted. Deducted but deposited after the due date: 1.5% a month from the date deducted to the date paid. Part of a month counts as a full month.',
+    src: 'https://kcshah.com/blog-late-filing-penalties-fy2627', src2: 'https://www.incometaxindia.gov.in/w/section-234e' }
+};
+const LATE_EDIT = [['gstFee', 'perDay', 'GST late fee per day (₹)'], ['gstFee', 'nilPerDay', 'GST late fee per day, nil return (₹)'], ['gstFee', 'nilCap', 'Maximum, nil return (₹)'], ['gstFee', 'cap1', 'Maximum, turnover up to slab 1 (₹)'], ['gstFee', 'cap2', 'Maximum, turnover up to slab 2 (₹)'], ['gstFee', 'cap3', 'Maximum, turnover above slab 2 (₹)'], ['gstFee', 'slab1', 'Turnover slab 1 (₹)'], ['gstFee', 'slab2', 'Turnover slab 2 (₹)'], ['gstInt', 'rate', 'GST interest on late tax (% a year)'], ['gstInt', 'itcRate', 'GST interest on excess ITC used (% a year)'], ['tdsFee', 'perDay', 'TDS statement fee per day (₹)'], ['tdsInt', 'notDed', 'TDS not deducted (% a month)'], ['tdsInt', 'latePay', 'TDS deposited late (% a month)']];
+function lateR() { const o = clone(LATE_RULES), u = (S.settings && S.settings.lateRules) || {}; for (const g of Object.keys(u)) if (o[g]) for (const k of Object.keys(u[g])) if (isFinite(+u[g][k]) && u[g][k] !== '') o[g][k] = +u[g][k]; return o; }
+async function lateSaveRules(vals) {
+  if (!canNt()) return denyToast();
+  const u = {}; for (const [g, k] of LATE_EDIT) { const x = vals[g + '.' + k]; if (x === undefined || x === '' || !isFinite(+x)) continue; if (+x !== LATE_RULES[g][k]) (u[g] = u[g] || {})[k] = +x; }
+  S.settings.lateRules = u; await saveSettings(); return true;
+}
+const lateDays = (due, done) => due && done ? Math.max(0, cmpDays(due, done)) : 0;
+const lateMonths = (a, b) => (!a || !b || b < a) ? 0 : (+b.slice(0, 4) - +a.slice(0, 4)) * 12 + (+b.slice(5, 7) - +a.slice(5, 7)) + 1;
+// GSTR-1 / GSTR-3B late fee
+function lateGstFee({ due, filed, nil, turnover }) {
+  const R = lateR().gstFee, days = lateDays(due, filed), t = num(turnover);
+  const perDay = nil ? R.nilPerDay : R.perDay, cap = nil ? R.nilCap : t <= R.slab1 ? R.cap1 : t <= R.slab2 ? R.cap2 : R.cap3;
+  const raw = days * perDay, fee = Math.min(raw, cap);
+  return { days, perDay, cap, raw, fee, capped: raw > cap, cgst: r2(fee / 2), sgst: r2(fee / 2) };
+}
+// GST interest: late tax (sec 50(1)) or excess ITC used (sec 50(3)); simple interest by days / 365
+function lateGstInt({ amt, from, to, itc }) {
+  const R = lateR().gstInt, days = lateDays(from, to), rate = itc ? R.itcRate : R.rate;
+  return { days, rate, interest: r2(num(amt) * rate / 100 * days / 365) };
+}
+// TDS statement late fee (sec 427 / old 234E)
+function lateTdsFee({ due, filed, tds }) {
+  const R = lateR().tdsFee, days = lateDays(due, filed), raw = days * R.perDay, t = num(tds), fee = Math.min(raw, t);
+  return { days, perDay: R.perDay, raw, fee, capped: raw > t };
+}
+// TDS deposit due: 7th of next month; March deductions 30 April
+const tdsDepDue = d => { if (!d) return ''; const y = +d.slice(0, 4), m = +d.slice(5, 7); return m === 3 ? `${y}-04-30` : m === 12 ? `${y + 1}-01-07` : `${y}-${cmpPad(m + 1)}-07`; };
+// TDS interest (sec 398(3)(a) / old 201(1A)): months or part, calendar months counted inclusive
+function lateTdsInt({ tds, deductible, deducted, paid, depDue }) {
+  const R = lateR().tdsInt, t = num(tds); deducted = deducted || deductible; depDue = depDue || tdsDepDue(deducted);
+  const m1 = deducted > deductible ? lateMonths(deductible, deducted) : 0;
+  const m2 = paid && paid > depDue ? lateMonths(deducted, paid) : 0;
+  const i1 = r2(t * R.notDed / 100 * m1), i2 = r2(t * R.latePay / 100 * m2);
+  return { m1, m2, i1, i2, depDue, total: r2(i1 + i2) };
+}
+let LATE_IN = null;
+const lateIn = () => LATE_IN || (LATE_IN = { g_ret: '3b', g_due: '', g_filed: today(), g_nil: false, g_turn: num(co().turnover) || '', i_amt: '', i_from: '', i_to: today(), i_itc: false, t_tds: '', t_due: '', t_filed: today(), d_tds: '', d_able: '', d_ded: '', d_paid: today() });
+function lateBody() {
+  const I = lateIn(), R = lateR(), ro = !canNt();
+  const f = (k, lab, t) => `<div class="f"><label>${lab}</label><input id="lf_${k}" class="lfIn" ${t === 'd' ? 'type="date"' : 'inputmode="decimal"'} value="${esc(I[k])}"></div>`;
+  const link = r => `<a href="${esc(r.src)}" target="_blank" rel="noopener">${esc(r.sec)}</a>${r.src2 ? ` · <a href="${esc(r.src2)}" target="_blank" rel="noopener">more</a>` : ''}`;
+  return `<div class="sect">GSTR-1 / GSTR-3B late fee</div><div class="card">
+    <div class="f2"><div class="f"><label>Return</label><select id="lf_g_ret" class="lfIn"><option value="3b" ${I.g_ret === '3b' ? 'selected' : ''}>GSTR-3B</option><option value="1" ${I.g_ret === '1' ? 'selected' : ''}>GSTR-1</option></select></div>${f('g_turn', 'Turnover last FY (₹)')}</div>
+    <div class="f2">${f('g_due', 'Due date', 'd')}${f('g_filed', 'Filed on (or today)', 'd')}</div>
+    <label class="ck"><input type="checkbox" id="lf_g_nil" class="lfIn" ${I.g_nil ? 'checked' : ''}> <span>Nil return (no tax / no sales)</span></label>
+    <div class="kv"><span>Late fee (CGST + SGST)</span><b id="lfGstFee">—</b></div><div class="mu" id="lfGstWork" style="font-size:12px"></div>
+    <div class="mu" style="font-size:11.5px;margin-top:4px">${esc(R.gstFee.what)} ${link(R.gstFee)}</div></div>
+  <div class="sect">GST interest</div><div class="card">
+    <label class="ck"><input type="checkbox" id="lf_i_itc" class="lfIn" ${I.i_itc ? 'checked' : ''}> <span>Excess / wrong ITC used (instead of tax paid late)</span></label>
+    ${f('i_amt', 'Tax paid late in cash, or ITC used (₹)')}
+    <div class="f2">${f('i_from', 'Due date / date ITC used', 'd')}${f('i_to', 'Paid / reversed on', 'd')}</div>
+    <div class="kv"><span>Interest</span><b id="lfGstInt">—</b></div><div class="mu" id="lfGstIntWork" style="font-size:12px"></div>
+    <div class="mu" style="font-size:11.5px;margin-top:4px">${esc(R.gstInt.what)} ${link(R.gstInt)}</div></div>
+  <div class="sect">TDS statement late fee — ${esc(R.tdsFee.sec)}</div><div class="card">
+    ${f('t_tds', 'TDS in the statement (₹)')}<div class="f2">${f('t_due', 'Due date', 'd')}${f('t_filed', 'Filed on (or today)', 'd')}</div>
+    <div class="kv"><span>Late fee</span><b id="lfTdsFee">—</b></div><div class="mu" id="lfTdsFeeWork" style="font-size:12px"></div>
+    <div class="mu" style="font-size:11.5px;margin-top:4px">${esc(R.tdsFee.what)} ${link(R.tdsFee)}</div></div>
+  <div class="sect">TDS interest — ${esc(R.tdsInt.sec)}</div><div class="card">
+    ${f('d_tds', 'TDS amount (₹)')}<div class="f2">${f('d_able', 'Should have been deducted on', 'd')}${f('d_ded', 'Actually deducted on', 'd')}</div>${f('d_paid', 'Deposited on', 'd')}
+    <div class="kv"><span>Interest</span><b id="lfTdsInt">—</b></div><div class="mu" id="lfTdsIntWork" style="font-size:12px"></div>
+    <div class="mu" style="font-size:11.5px;margin-top:4px">${esc(R.tdsInt.what)} ${link(R.tdsInt)}</div></div>
+  <details class="card" id="lfRules"><summary><b>Rates used${ro ? '' : ' (edit)'}</b> <span class="mu" style="font-size:12px">— checked ${fd(LATE_ASOF)}${S.settings.lateRules && Object.keys(S.settings.lateRules).length ? ' · <span class="rd">changed by you</span>' : ''}</span></summary>
+    <div style="margin-top:8px">${LATE_EDIT.map(([g, k, l]) => `<div class="f2" style="align-items:center"><div style="font-size:12.5px">${l}${R[g][k] !== LATE_RULES[g][k] ? ` <span class="mu">(was ${LATE_RULES[g][k]})</span>` : ''}</div><div class="f" style="margin:0"><input class="lfRule" data-k="${g}.${k}" inputmode="decimal" value="${R[g][k]}" ${ro ? 'disabled' : ''}></div></div>`).join('')}
+    ${ro ? '' : `<div class="btns" style="margin-top:8px"><button class="btn sec sm" id="lfRulesSave">Save rates</button><button class="btn ghost sm" id="lfRulesReset">Reset to ${fd(LATE_ASOF)} rates</button></div>`}
+    <p class="mu" style="font-size:11.5px">Sources: <a href="${esc(R.gstFee.src)}" target="_blank" rel="noopener">Notification 19/2021-CT</a> · <a href="${esc(R.gstInt.src)}" target="_blank" rel="noopener">CGST sec 50</a> · <a href="${esc(R.gstInt.src2)}" target="_blank" rel="noopener">sec 50(3) 18% note</a> · <a href="${esc(R.tdsFee.src)}" target="_blank" rel="noopener">Sec 427 / 398(3)</a> · <a href="${esc(R.tdsFee.src2)}" target="_blank" rel="noopener">old 234E (Income Tax Dept)</a></p></div></details>`;
+}
+function lateCalc() {
+  if (!$('#lfGstFee')) return;
+  const I = lateIn();
+  $$('.lfIn').forEach(el => { const k = el.id.slice(3); I[k] = el.type === 'checkbox' ? el.checked : el.value; });
+  const g = lateGstFee({ due: I.g_due, filed: I.g_filed, nil: I.g_nil, turnover: I.g_turn });
+  $('#lfGstFee').textContent = I.g_due ? inr(g.fee) : '—';
+  $('#lfGstWork').textContent = I.g_due ? `${g.days} day${g.days === 1 ? '' : 's'} × ₹${g.perDay} = ${inr(g.raw)}${g.capped ? ` → capped at ${inr(g.cap)}` : ` (maximum ${inr(g.cap)})`} · CGST ${inr(g.cgst)} + SGST ${inr(g.sgst)}` : 'Enter the due date';
+  const gi = lateGstInt({ amt: I.i_amt, from: I.i_from, to: I.i_to, itc: I.i_itc });
+  $('#lfGstInt').textContent = I.i_from && num(I.i_amt) ? inr(gi.interest) : '—';
+  $('#lfGstIntWork').textContent = I.i_from && num(I.i_amt) ? `${inr(I.i_amt)} × ${gi.rate}% × ${gi.days} / 365 days` : 'Enter the amount and dates';
+  const tf = lateTdsFee({ due: I.t_due, filed: I.t_filed, tds: I.t_tds });
+  $('#lfTdsFee').textContent = I.t_due ? inr(tf.fee) : '—';
+  $('#lfTdsFeeWork').textContent = I.t_due ? `${tf.days} day${tf.days === 1 ? '' : 's'} × ₹${tf.perDay} = ${inr(tf.raw)}${tf.capped ? ` → capped at the TDS ${inr(I.t_tds)}` : ''}` : 'Enter the due date';
+  const ti = lateTdsInt({ tds: I.d_tds, deductible: I.d_able, deducted: I.d_ded, paid: I.d_paid });
+  $('#lfTdsInt').textContent = I.d_able && num(I.d_tds) ? inr(ti.total) : '—';
+  $('#lfTdsIntWork').textContent = I.d_able && num(I.d_tds) ? `Late deduction ${ti.m1} month${ti.m1 === 1 ? '' : 's'} × ${lateR().tdsInt.notDed}% = ${inr(ti.i1)} · late deposit (due ${fd(ti.depDue)}) ${ti.m2} month${ti.m2 === 1 ? '' : 's'} × ${lateR().tdsInt.latePay}% = ${inr(ti.i2)}` : 'Enter the TDS amount and dates';
+}
+function lateBind() {
+  if (!$('#lfGstFee')) return;
+  $$('.lfIn').forEach(el => { el.oninput = lateCalc; el.onchange = lateCalc; });
+  lateCalc();
+  const sv = $('#lfRulesSave'); if (sv) sv.onclick = async () => { const v = {}; $$('.lfRule').forEach(el => v[el.dataset.k] = el.value); await lateSaveRules(v); toast('Rates saved ✓'); vCompliance(); };
+  const rs = $('#lfRulesReset'); if (rs) rs.onclick = async () => { await lateSaveRules({}); toast('Rates reset'); vCompliance(); };
 }
 /* ================= CA pack 2 (I2): tax audit + 3CD helper, partner limits, 194Q, CC/OD stock statement ================= */
 /* Editable rule table — checked 12 Nov 2026 against the sources shown. Income-tax Act 2025 numbers, old 1961 Act numbers in brackets.
@@ -4067,7 +4402,7 @@ async function faDel(id) {
   if (clOn() && !can('masters')) return denyToast();
   const a = faAssets().find(x => x.id === id); if (!a) return;
   if (!(await ask(`Delete ${esc(a.name)} from the register? Depreciation already posted stays until you post again.`, { ok: 'Delete', danger: true }))) return;
-  S.settings.assets = faAssets().filter(x => x.id !== id); await saveSettings(); dirty(); toast('Deleted'); vFa();
+  S.settings.assets = faAssets().filter(x => x.id !== id); await saveSettings(); await docPurge('fa', id); dirty(); toast('Deleted'); vFa();
 }
 /* ---- reports (shared CSV / print with the CA pack) ---- */
 function faReport(kind, y = faFy()) {
@@ -4110,7 +4445,7 @@ function faAssetSheet(id, pre) {
     <div class="f2">${f('supplier', 'Supplier')}${f('billRef', 'Bill no.')}</div>
     <div class="f2">${f('loc', 'Location')}${f('serial', 'Serial no.')}</div>
     <div class="sect">Sold / scrapped (leave blank if still in use)</div>
-    <div class="f2">${f('dispDate', 'Date', { t: 'date' })}${f('dispValue', 'Sale value (₹)', { n: 1 })}</div>`,
+    <div class="f2">${f('dispDate', 'Date', { t: 'date' })}${f('dispValue', 'Sale value (₹)', { n: 1 })}</div>${id ? docCard('fa', id) : ''}`,
     `<button class="btn full" id="fa_save">Save Asset</button>`);
   $('#fa_fromBill').onclick = () => {
     const bills = S.vouchers.filter(v => v.type === 'purchase').sort((x, y) => y.date.localeCompare(x.date));
@@ -4189,6 +4524,7 @@ function routeAllowed(a, b) {
     case 'r': return can('reports');
     case 'audit': return can('reports');
     case 'compliance': return can('reports');
+    case 'approvals': return ROLE() !== 'ca' && ROLE() !== 'viewer';
     case 'fa': return can('reports');
     case 'queries': return can('query');
     default: return true;
@@ -4304,7 +4640,7 @@ window.addEventListener('offline', () => { CL.online = false; clStatus(); });
 /* ---------- remote merge (last write wins) ---------- */
 function localU(col, id) {
   if (col === 'settings') return S.settings.updatedAt || 0;
-  const r = S[col].find(x => x.id === id) || (col === 'vouchers' ? (S.audit.find(x => x.id === id) || S.queries.find(x => x.id === id)) : null); const t = CL.tombs[col + '/' + id] || 0;
+  const r = S[col].find(x => x.id === id) || (col === 'vouchers' ? (S.pend.find(x => x.id === id) || S.audit.find(x => x.id === id) || S.queries.find(x => x.id === id)) : null); const t = CL.tombs[col + '/' + id] || 0;
   return Math.max(r ? (r.updatedAt || 0) : 0, t);
 }
 function applyRemote(col, id, val) {
@@ -4329,11 +4665,11 @@ function applyRemote(col, id, val) {
       rec.updatedAt = val.updatedAt; rec.id = id; await DB.put(col, rec);
       const i = S.queries.findIndex(x => x.id === id); if (i >= 0) S.queries[i] = rec; else S.queries.push(rec);
     } else if (val.deleted) {
-      await DB.del(col, id); S[col] = S[col].filter(x => x.id !== id); CL.tombs[qk] = val.updatedAt; await clSaveTombs();
+      await DB.del(col, id); S[col] = S[col].filter(x => x.id !== id); if (col === 'vouchers') S.pend = S.pend.filter(x => x.id !== id); CL.tombs[qk] = val.updatedAt; await clSaveTombs();
     } else {
       let rec; try { rec = JSON.parse(val.j); } catch (e) { return; }
       rec.updatedAt = val.updatedAt; rec.id = id; await DB.put(col, rec);
-      const arr = S[col]; const i = arr.findIndex(x => x.id === id); if (i >= 0) arr[i] = rec; else arr.push(rec);
+      if (col === 'vouchers') vPlace(rec); else { const arr = S[col]; const i = arr.findIndex(x => x.id === id); if (i >= 0) arr[i] = rec; else arr.push(rec); }
       if (CL.tombs[qk]) { delete CL.tombs[qk]; await clSaveTombs(); }
     }
     dirty(); clRerender();
@@ -4410,7 +4746,7 @@ async function initialSync() {
       const snap = await base.child(col).once('value'); const remote = snap.val() || {};
       if (c.uploadLocal !== false) {
         if (col === 'settings') { const r = remote.main; if (S.settings.setupDone && (!r || (S.settings.updatedAt || 0) > r.updatedAt)) { if (!S.settings.updatedAt) S.settings.updatedAt = Date.now(); await DB.put('kv', S.settings, 'settings'); CL.q['settings/main'] = settingsPayload(); } }
-        else (col === 'vouchers' ? [...S.vouchers, ...S.audit, ...S.queries] : S[col]).forEach(rec => { const r = remote[rec.id]; if (!rec.updatedAt) rec.updatedAt = Date.now(); if (!r || rec.updatedAt > r.updatedAt) CL.q[col + '/' + rec.id] = { updatedAt: rec.updatedAt, j: JSON.stringify(rec) }; });
+        else (col === 'vouchers' ? [...S.vouchers, ...S.pend, ...S.audit, ...S.queries] : S[col]).forEach(rec => { const r = remote[rec.id]; if (!rec.updatedAt) rec.updatedAt = Date.now(); if (!r || rec.updatedAt > r.updatedAt) CL.q[col + '/' + rec.id] = { updatedAt: rec.updatedAt, j: JSON.stringify(rec) }; });
       }
       for (const [id, val] of Object.entries(remote)) await applyRemote(col, id, val);
     }
