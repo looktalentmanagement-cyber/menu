@@ -876,6 +876,7 @@ function route() {
       case 'audit': return vAudit(b);
       case 'queries': return vQueries();
       case 'compliance': return vCompliance(q);
+      case 'fa': return vFa(q);
       default: go('home');
     }
   } catch (e) { console.warn(e); $('#main').innerHTML = emptyBox('⚠️', 'Something went wrong', esc(e.message)); }
@@ -1238,7 +1239,7 @@ function exportLedger(id) {
 /* ================= More ================= */
 function vMore() {
   hdr('More', { right: searchBtn() });
-  const m = [['reports', '📊', 'Reports'], ...(can('reports') ? [['compliance', '🗓', 'Compliance']] : []), ['exp', '💸', 'Expenses'], ['prod', '🏭', 'Production'], ['bill?f=quote', '📝', 'Quotations'], ['bill?f=pay', '💰', 'Payments'], ['bill?f=ret', '↩', 'Returns / CN / DN'], ...(taxMode() === 'regular' ? [['r/gstr1', '📤', 'GSTR-1'], ['r/gstr3b', '🧮', 'GSTR-3B'], ...(can('reports') ? [['gstr2b', '📥', 'GSTR-2B Match']] : [])] : taxMode() === 'composition' ? [['r/cmp08', '🧾', 'CMP-08']] : []), ['r/pl', '📈', 'Profit & Loss'], ['r/bs', '🏛', 'Balance Sheet'], ['accounts', '📚', 'Accounts'], ['r/tb', '⚖️', 'Trial Balance'], ['brs', '🏦', 'Bank Reconciliation'], ['tax', '💡', 'Tax Saving'], ['audit', '🕵', 'Audit Trail'], ...(can('query') ? [['queries', '💬', 'Queries' + (qOpen() ? ` (${qOpen()})` : '')]] : []), ...(caAcct() ? [['clients', '👥', 'My Clients']] : []), ['settings', '⚙️', 'Settings & Backup']];
+  const m = [['reports', '📊', 'Reports'], ...(can('reports') ? [['compliance', '🗓', 'Compliance']] : []), ['exp', '💸', 'Expenses'], ['prod', '🏭', 'Production'], ['bill?f=quote', '📝', 'Quotations'], ['bill?f=pay', '💰', 'Payments'], ['bill?f=ret', '↩', 'Returns / CN / DN'], ...(taxMode() === 'regular' ? [['r/gstr1', '📤', 'GSTR-1'], ['r/gstr3b', '🧮', 'GSTR-3B'], ...(can('reports') ? [['gstr2b', '📥', 'GSTR-2B Match']] : [])] : taxMode() === 'composition' ? [['r/cmp08', '🧾', 'CMP-08']] : []), ['r/pl', '📈', 'Profit & Loss'], ['r/bs', '🏛', 'Balance Sheet'], ['accounts', '📚', 'Accounts'], ...(can('reports') ? [['fa', '🏗', 'Fixed Assets']] : []), ['r/tb', '⚖️', 'Trial Balance'], ['brs', '🏦', 'Bank Reconciliation'], ['tax', '💡', 'Tax Saving'], ['audit', '🕵', 'Audit Trail'], ...(can('query') ? [['queries', '💬', 'Queries' + (qOpen() ? ` (${qOpen()})` : '')]] : []), ...(caAcct() ? [['clients', '👥', 'My Clients']] : []), ['settings', '⚙️', 'Settings & Backup']];
   $('#main').innerHTML = `<div class="mgrid">${m.map(([h, i, l]) => `<button onclick="go('${h}')"><span class="i">${i}</span>${l}</button>`).join('')}</div>
   <div class="card"><h3>New Entry</h3><div class="btns"><button class="btn" onclick="go('new/sale')">+ Sales Invoice</button><button class="btn sec" onclick="go('new/purchase')">+ Purchase Bill</button><button class="btn ghost" onclick="go('new/quote')">+ Quotation</button></div></div>
   <div class="card"><div class="kv"><span>Business</span><b>${esc(co().name)}</b></div><div class="kv"><span>Tax mode</span><span id="moreTax">${TAXMODES.find(x => x[0] === taxMode())[1]}</span></div>${isGstCo() ? `<div class="kv"><span>GSTIN</span><span>${esc(co().gstin || '—')}</span></div>` : ''}<div class="kv"><span>Data</span><span>${S.items.length} items · ${S.parties.length} parties · ${S.vouchers.length} entries</span></div></div>`;
@@ -2152,8 +2153,9 @@ function cfCalc(from, to) {
   const gs = (T, g) => { let s = 0; T.forEach((b, id) => { if (g.includes(grpOf(id, L))) s += b; }); return r2(s); };
   const dl = g => r2(gs(T1, g) - gs(T0, g));
   const C = { np: plCalc(from, to).np, inv: -r2(invValue(to) - invValue(addDays(from, -1))), recv: -dl(['debtors']), pay: -dl(['creditors']), duties: -dl(['duties']), oth: -dl(['curassets', 'curliab']) };
-  C.op = r2(C.np + C.inv + C.recv + C.pay + C.duties + C.oth);
-  C.fixed = -dl(['fixed']); C.inv_ = C.fixed;
+  C.dep = faDepIn(from, to); // non-cash: added back, and taken out of the fixed-asset movement
+  C.op = r2(C.np + C.dep + C.inv + C.recv + C.pay + C.duties + C.oth);
+  C.fixed = r2(-dl(['fixed']) - C.dep); C.inv_ = C.fixed;
   C.capital = -dl(['capital']); C.loans = -dl(['loans']); C.fin = r2(C.capital + C.loans);
   C.net = r2(C.op + C.fixed + C.fin);
   C.open = gs(T0, ['cashg', 'bankg']); C.close = gs(T1, ['cashg', 'bankg']); C.actual = r2(C.close - C.open);
@@ -2268,7 +2270,7 @@ function vAccounts() {
   hdr('Accounts', { back: true });
   const T = accTotals(), L = accList(), od = openDiff();
   $('#main').innerHTML = `<div class="btns" style="margin-bottom:10px"><button class="btn" id="accAdd" onclick="addLedger()">+ Add Ledger</button><button class="btn sec" onclick="go('r/tb')">Trial Balance</button></div>
-  <div class="btns" style="margin-bottom:10px"><button class="btn ghost sm" id="accOpenBtn" onclick="editOpenings()">Opening Balances</button><button class="btn ghost sm" onclick="addExpCat()">+ Expense Category</button><button class="btn ghost sm" onclick="go('brs')">Bank Reconciliation</button><button class="btn ghost sm" onclick="go('r/pl')">Profit &amp; Loss</button><button class="btn ghost sm" onclick="go('r/bs')">Balance Sheet</button><button class="btn ghost sm" onclick="go('r/cf')">Cash Flow</button></div>
+  <div class="btns" style="margin-bottom:10px"><button class="btn ghost sm" id="accOpenBtn" onclick="editOpenings()">Opening Balances</button><button class="btn ghost sm" onclick="addExpCat()">+ Expense Category</button><button class="btn ghost sm" onclick="go('brs')">Bank Reconciliation</button><button class="btn ghost sm" onclick="go('r/pl')">Profit &amp; Loss</button><button class="btn ghost sm" onclick="go('r/bs')">Balance Sheet</button><button class="btn ghost sm" onclick="go('r/cf')">Cash Flow</button><button class="btn ghost sm" id="accFa" onclick="go('fa')">🏗 Fixed Assets</button></div>
   <div class="btns" style="margin-bottom:12px"><button class="btn ghost sm" onclick="go('acv/rcpt')">+ Receipt</button><button class="btn ghost sm" onclick="go('acv/pmt')">+ Payment</button><button class="btn ghost sm" onclick="go('acv/contra')">+ Contra</button><button class="btn ghost sm" onclick="go('acv/jv')">+ Journal</button></div>
   ${Math.abs(od) > 0.004 ? `<div class="warnbox" style="margin-bottom:10px">Opening balances differ by ${inr(Math.abs(od))} (${od > 0 ? 'Dr' : 'Cr'}). Add your capital or other opening balances to clear it.</div>` : ''}
   <div id="accList">${GROUPS.map(([g, gn]) => { const ls = L.filter(l => l.group === g); const tot = r2(ls.reduce((s, l) => s + (T.get(l.id) || 0), 0));
@@ -2354,7 +2356,7 @@ function setPreset(p) {
 }
 function setMonth(m) { if (!m) return; RANGE.touched = true; RANGE.from = m + '-01'; RANGE.to = monthEnd(RANGE.from); RANGE.p = 'custom'; render(); }
 const ALL_REPORTS = [
-  ['compliance', '🗓', 'Compliance (CA pack)', 'Due dates, MSME 45-day, cash limits, ITC 180-day, tax audit, partners, TDS on purchase, bank stock statement', 'all'],
+  ['compliance', '🗓', 'Compliance (CA pack)', 'Due dates, MSME 45-day, cash limits, 180-day credit reversal, tax audit, partners, TDS on purchase, bank stock statement', 'all'],
   ['sales', '🧾', 'Sales Register', 'All sales invoices', 'all'],
   ['purchase', '🛒', 'Purchase Register', 'All purchase bills', 'all'],
   ['gstr1', '📤', 'GSTR-1', 'B2B, B2CL, B2CS, CDNR, CDNUR, HSN, Docs + JSON', 'regular'],
@@ -2710,7 +2712,7 @@ function buildReport(name) {
   if (name === 'cf') {
     R.title = 'Cash Flow';
     const C = cfCalc(RANGE.from, RANGE.to); R.cf = C;
-    const rows = [['A. Cash from operating activities', ''], ['Net profit', C.np], ['(Increase) / decrease in stock', C.inv], ['(Increase) / decrease in trade receivables', C.recv], ['Increase / (decrease) in trade payables', C.pay], ['Increase / (decrease) in duties & taxes', C.duties], ['Change in other current assets / liabilities', C.oth], ['Net cash from operating activities', C.op],
+    const rows = [['A. Cash from operating activities', ''], ['Net profit', C.np], ...(C.dep ? [['Add: depreciation (non-cash)', C.dep]] : []), ['(Increase) / decrease in stock', C.inv], ['(Increase) / decrease in trade receivables', C.recv], ['Increase / (decrease) in trade payables', C.pay], ['Increase / (decrease) in duties & taxes', C.duties], ['Change in other current assets / liabilities', C.oth], ['Net cash from operating activities', C.op],
       ['B. Cash from investing activities', ''], ['(Purchase) / sale of fixed assets', C.fixed], ['Net cash from investing activities', C.fixed],
       ['C. Cash from financing activities', ''], ['Capital introduced / (drawings)', C.capital], ['Loans taken / (repaid)', C.loans], ['Net cash from financing activities', C.fin],
       ['Net change in cash & bank (A + B + C)', C.net], ['Cash & bank at start', C.open], ['Cash & bank at end', C.close]];
@@ -3631,8 +3633,8 @@ function ca2Form3cd(y = ca2Fy()) {
   const tdsBal = (() => { const b = accTotals(fe).get('tds_pay') || 0; return r2(-b); })();
   const g = gstOutDocs(vs), gt = r2(g.reduce((s, v) => s + sgnOf(v) * num(v.taxable), 0)), gx = r2(g.reduce((s, v) => s + sgnOf(v) * (num(v.cgst) + num(v.sgst) + num(v.igst) + num(v.cess)), 0));
   const Q = ca2StockQty(fs, fe);
-  const L = accList(), TT = accTotals(fe);
-  const fixed = L.filter(l => l.group === 'fixed').map(l => [l.name, r2(TT.get(l.id) || 0), 'Fill from fixed asset register (Income-tax WDV rates)']);
+  const FI = faIt(y), fixed = FI.rows.map(r => [r.name, r.rate, r.open, r2(r.add180 + r.addLt), r.addLt, r.del, r2(r.dep + r.addl), r.close]);
+  if (FI.rows.length) fixed.push(['Book depreciation in profit & loss (add back)', '', '', '', '', '', FI.book, ''], ['Net: tax depreciation − book depreciation', '', '', '', '', '', FI.diff, '']);
   return {
     title: `Tax audit helper (Form 3CD data) — FY ${y}-${String((y + 1) % 100).padStart(2, '0')}`, A,
     cards: [['Turnover', inr(A.turnover)], ['Gross profit', `${inr(A.gp)} (${ca2Pct(A.gp, A.turnover)}%)`], ['Net profit', `${inr(A.np)} (${ca2Pct(A.np, A.turnover)}%)`], ['Tax audit', A.applies ? 'Likely needed' : 'Likely not needed']],
@@ -3644,7 +3646,7 @@ function ca2Form3cd(y = ca2Fy()) {
       { title: 'TDS deducted (clause 34)', key: 'c34', cols: [C('Section'), C('Entries', 1), C('Amount paid', 1), C('TDS', 1)], rows: tdsRows.concat([['TDS payable balance in books on ' + fd(fe), '', '', tdsBal]]) },
       { title: 'GST registration and turnover (clause 44 / 4)', key: 'c44', cols: [C('GSTIN'), C('State'), C('Taxable sales', 1), C('Output GST', 1)], rows: isGstCo() ? [[co().gstin || 'Not entered', stateName(co().state), gt, gx]] : [['Not registered', '', 0, 0]] },
       { title: 'Quantity details of stock (clause 35)', key: 'c35', cols: [C('Item'), C('Unit'), C('Opening', 1), C('Purchased', 1), C('Made', 1), C('Used in making', 1), C('Sold', 1), C('Closing', 1)], rows: Q.map(r => [r.name, r.unit, r.open, r.pur, r.prodIn, r.used, r.sale, r.close]) },
-      { title: 'Depreciation (clause 18) — to fill', key: 'c18', cols: [C('Fixed asset ledger'), C('Book balance', 1), C('Note')], rows: fixed.length ? fixed : [['No fixed asset ledgers', 0, 'Add assets under Fixed Assets in Accounts']] }
+      { title: 'Depreciation as per income-tax (clause 18) — from Fixed Assets', key: 'c18', cols: [C('Block'), C('Rate %', 1), C('Opening WDV', 1), C('Additions', 1), C('of which under 180 days', 1), C('Sold', 1), C('Depreciation allowable', 1), C('Closing WDV', 1)], rows: fixed.length ? fixed : [['No assets in the Fixed Assets register', '', 0, 0, 0, 0, 0, 0]] }
     ],
     note: 'Estimate — confirm with your CA. Figures are from your books; the CA checks them before filing the audit report.'
   };
@@ -3856,6 +3858,324 @@ function ca2Bind() {
 
 function canV(type) { const r = ROLE(); if (r === 'owner' || r === 'manager') return true; if (r === 'billing') return type === 'sale' || type === 'quote'; return false; }
 function canSeeV(v) { return ROLE() !== 'billing' || !['purchase', 'pret', 'payout', 'exp', ...ACC_T].includes(v.type); }
+/* ================= Fixed assets (E2): register, book depreciation (Companies Act), income-tax block depreciation ================= */
+/* Editable rule table — checked 12 Nov 2026 against the sources shown. Estimate — confirm with your CA.
+   Income-tax: Income-tax Act 2025 sec 33 (old 1961 sec 32), rates in Appendix I to rule 25 of the Income-tax Rules 2026 (old rule 5).
+   Book: Companies Act 2013 Schedule II Part C useful lives, residual value not more than 5% of cost, pro rata by days (Note 2). */
+const DEP_RULES = {
+  asOf: '2026-11-12',
+  residualPct: 5,
+  it: {
+    sec: 'Sec 33 (old 32)', rule: 'Rule 25 + Appendix I, Income-tax Rules 2026 (old rule 5)',
+    halfDays: 180, addl: 20, addlSec: 'Sec 33(8)-(9) (old 32(1)(iia))',
+    src: 'https://www.incometaxindia.gov.in/w/section-33-187', srcRates: 'https://www.incometaxindia.gov.in/w/appendix-i-1',
+    what: 'Written down value (WDV) by block. Half the rate on assets bought and put to use for less than 180 days in the year. Additional 20% (10% now + 10% next year if under 180 days) on new plant & machinery of a manufacturer — not office appliances, road vehicles, or anything second-hand or installed in an office / home.'
+  },
+  ca: { sec: 'Companies Act 2013 Schedule II', src: 'https://incometaxindia.gov.in/w/schedule-ii', what: 'Useful life from Schedule II Part C; residual value up to 5% of cost; added / sold assets depreciated pro rata by days.' },
+  blocks: {
+    B5: { name: 'Building — mainly residential', rate: 5 },
+    B10: { name: 'Building — other (office, shop, factory, godown)', rate: 10 },
+    B40: { name: 'Building — purely temporary structure', rate: 40 },
+    F10: { name: 'Furniture & fittings (incl. electrical fittings)', rate: 10 },
+    PM15: { name: 'Plant & machinery — general (incl. own cars)', rate: 15, pm: 1 },
+    PM30: { name: 'Plant & machinery — buses / lorries / taxis on hire', rate: 30, pm: 1 },
+    PM40: { name: 'Plant & machinery — computers, software, books, EV, solar', rate: 40, pm: 1 },
+    I25: { name: 'Intangibles — patents, trademarks, licences, know-how', rate: 25 },
+    S20: { name: 'Ships', rate: 20 }
+  },
+  /* category -> income-tax block + Schedule II useful life (years). addl: can get additional depreciation */
+  cats: {
+    pm: { name: 'Plant & machinery (general)', block: 'PM15', life: 15, addl: 1 },
+    furn: { name: 'Furniture & fittings', block: 'F10', life: 10 },
+    furnHotel: { name: 'Furniture — hotel / restaurant / school', block: 'F10', life: 8 },
+    elec: { name: 'Electrical installations & fittings', block: 'F10', life: 10 },
+    office: { name: 'Office equipment (AC, printer, phone)', block: 'PM15', life: 5 },
+    comp: { name: 'Computer / laptop / mobile (end-user)', block: 'PM40', life: 3 },
+    server: { name: 'Server & network', block: 'PM40', life: 6 },
+    soft: { name: 'Computer software', block: 'PM40', life: 3, own: 1 },
+    car: { name: 'Motor car (not on hire)', block: 'PM15', life: 8 },
+    bike: { name: 'Motorcycle / scooter', block: 'PM15', life: 10 },
+    hire: { name: 'Bus / lorry / taxi run on hire', block: 'PM30', life: 6 },
+    ev: { name: 'Electric vehicle', block: 'PM40', life: 8 },
+    solar: { name: 'Solar / renewable energy device', block: 'PM40', life: 15, addl: 1 },
+    lab: { name: 'Laboratory equipment', block: 'PM15', life: 10, addl: 1 },
+    books: { name: 'Books (profession / lending library)', block: 'PM40', life: 3, own: 1 },
+    bldRcc: { name: 'Building — RCC frame (office / shop)', block: 'B10', life: 60 },
+    bld: { name: 'Building — other than RCC / factory', block: 'B10', life: 30 },
+    bldResRcc: { name: 'Residential building — RCC frame', block: 'B5', life: 60 },
+    bldRes: { name: 'Residential building — other than RCC', block: 'B5', life: 30 },
+    temp: { name: 'Temporary structure / shed', block: 'B40', life: 3 },
+    intang: { name: 'Patent / trademark / licence', block: 'I25', life: 10, own: 1 },
+    land: { name: 'Land (not depreciated)', block: '', life: 0 }
+  }
+};
+const FA_DEP = 'fa_dep', FA_SALE = 'fa_sale';
+let FA_TAB = 'reg', FA_FY = 0;
+const faCfg = () => ({ method: 'slm', mfg: false, itFrom: 0, itOpen: {}, ...(S.settings.fa || {}) });
+const faAssets = () => S.settings.assets || [];
+const faCat = a => DEP_RULES.cats[a.cat] || DEP_RULES.cats.pm;
+const faLife = a => num(a.life) > 0 ? num(a.life) : faCat(a).life;
+const faUse = a => a.use || a.buy || '';
+const faFyOf = d => +fyStart(d).slice(0, 4);
+const faDays = (a, b) => Math.round((Date.parse(b + 'T00:00:00Z') - Date.parse(a + 'T00:00:00Z')) / 864e5) + 1;
+const faFyLbl = y => `${y}-${String((y + 1) % 100).padStart(2, '0')}`;
+const faFy = () => FA_FY || ca2Fy();
+function faYears() {
+  const c = +fyStart().slice(0, 4); let m = c;
+  faAssets().forEach(a => { if (faUse(a)) m = Math.min(m, faFyOf(faUse(a))); });
+  const o = []; for (let y = c; y >= Math.max(m, c - 15); y--) o.push(y); return o;
+}
+/* ---- book depreciation, one asset, one FY (method 'slm' | 'wdv') ---- */
+function faBookRow(a, y, method = faCfg().method) {
+  const C = r2(num(a.cost)), L = faLife(a), use = faUse(a), resP = DEP_RULES.residualPct, res = r2(C * resP / 100);
+  const R = { id: a.id, name: a.name, ledger: a.ledger, openCost: 0, add: 0, del: 0, closeCost: 0, openAcc: 0, dep: 0, delAcc: 0, closeAcc: 0, nbvOpen: 0, nbvClose: 0, sale: 0, gain: 0, sold: false, days: 0 };
+  if (!use || !C || faFyOf(use) > y) return R;
+  const rate = L > 0 ? 1 - Math.pow(Math.max(resP, 1) / 100, 1 / L) : 0;
+  let acc = 0;
+  for (let yr = faFyOf(use); yr <= y; yr++) {
+    const [fs, fe] = ca2Range(yr), disp = a.dispDate || '';
+    if (disp && disp < fs) return R; // gone before this year
+    const st = use > fs ? use : fs, en = disp && disp < fe ? disp : fe;
+    let dep = 0, days = 0;
+    if (L > 0 && st <= en) {
+      days = faDays(st, en); const yd = faDays(fs, fe), nbv = r2(C - acc);
+      dep = method === 'wdv' ? nbv * rate * days / yd : (C - res) / L * days / yd;
+      dep = r2(Math.max(0, Math.min(dep, r2(nbv - res))));
+    }
+    if (yr === y) {
+      const inYr = faFyOf(use) === y, sold = !!(disp && disp <= fe);
+      Object.assign(R, { openCost: inYr ? 0 : C, add: inYr ? C : 0, openAcc: r2(acc), dep, days, nbvOpen: inYr ? 0 : r2(C - acc) });
+      if (sold) { R.sold = true; R.del = C; R.delAcc = r2(acc + dep); R.sale = r2(num(a.dispValue)); R.gain = r2(R.sale - (C - acc - dep)); }
+      else { R.closeCost = C; R.closeAcc = r2(acc + dep); R.nbvClose = r2(C - acc - dep); }
+      return R;
+    }
+    acc = r2(acc + dep);
+  }
+  return R;
+}
+function faBook(y = faFy(), method) {
+  const rows = faAssets().map(a => faBookRow(a, y, method)).filter(r => r.openCost || r.add || r.del);
+  const T = k => r2(rows.reduce((s, r) => s + r[k], 0));
+  return { y, rows, dep: T('dep'), openCost: T('openCost'), add: T('add'), del: T('del'), closeCost: T('closeCost'), openAcc: T('openAcc'), delAcc: T('delAcc'), closeAcc: T('closeAcc'), nbvClose: T('nbvClose'), gain: T('gain') };
+}
+/* ---- income-tax depreciation, block-wise WDV ---- */
+function faIt(y = faFy()) {
+  const cfg = faCfg(), as = faAssets().filter(a => faUse(a) && faCat(a).block);
+  const from = cfg.itFrom || Math.min(y, ...as.map(a => faFyOf(faUse(a))));
+  const wdv = {}, carry = {}; // carry: additional dep due next year (10% part), by asset
+  Object.keys(DEP_RULES.blocks).forEach(k => { wdv[k] = r2(num((cfg.itOpen || {})[k])); });
+  let out = null;
+  for (let yr = from; yr <= y; yr++) {
+    const [fs, fe] = ca2Range(yr), rows = [];
+    for (const k of Object.keys(DEP_RULES.blocks)) {
+      const B = DEP_RULES.blocks[k], r = { block: k, name: B.name, rate: B.rate, open: wdv[k], add180: 0, addLt: 0, del: 0, base: 0, dep: 0, addl: 0, close: 0, cease: '', stcg: 0, items: [] };
+      const inB = as.filter(a => faCat(a).block === k);
+      for (const a of inB) {
+        const u = faUse(a), cost = r2(num(a.cost));
+        if (faFyOf(u) === yr && (!cfg.itFrom || yr >= cfg.itFrom)) {
+          const days = faDays(u, fe), lt = days < DEP_RULES.it.halfDays && (!a.buy || faFyOf(a.buy) === yr);
+          if (lt) r.addLt = r2(r.addLt + cost); else r.add180 = r2(r.add180 + cost);
+          r.items.push({ name: a.name, use: u, days, cost, half: lt });
+          if (cfg.mfg && a.newPM && B.pm && faCat(a).addl) { const full = r2(cost * DEP_RULES.it.addl / 100); if (lt) { r.addl = r2(r.addl + full / 2); carry[a.id] = { k, amt: r2(full / 2), yr: yr + 1 }; } else r.addl = r2(r.addl + full); }
+        }
+        if (a.dispDate && a.dispDate >= fs && a.dispDate <= fe) r.del = r2(r.del + num(a.dispValue));
+      }
+      for (const id in carry) if (carry[id].k === k && carry[id].yr === yr) { r.addl = r2(r.addl + carry[id].amt); delete carry[id]; }
+      r.base = r2(r.open + r.add180 + r.addLt - r.del);
+      const left = inB.some(a => faFyOf(faUse(a)) <= yr && !(a.dispDate && a.dispDate <= fe)) || (r.open > 0 && !inB.length);
+      if (r.base < 0) { r.stcg = r2(-r.base); r.cease = `Sale money is more than the block — ${inr(r.stcg)} is a short-term capital gain (Sec 74, old 50); no depreciation.`; r.base = 0; r.addl = 0; }
+      else if (r.base > 0 && !left && !num((cfg.itOpen || {})[k]) && (r.del || r.open) && inB.length) { r.cease = `Block ceased (no assets left) — ${inr(r.base)} is a short-term capital loss (Sec 74, old 50); no depreciation.`; r.stcg = r2(-r.base); r.dep = 0; r.addl = 0; r.close = 0; }
+      if (!r.cease) {
+        const fullPart = Math.max(0, r2(r.base - r.addLt)), halfPart = r2(r.base - fullPart); // sales come off the full-rate part first
+        r.dep = r2(fullPart * B.rate / 100 + halfPart * B.rate / 200);
+        r.addl = r2(Math.min(r.addl, Math.max(0, r.base - r.dep)));
+        r.close = r2(r.base - r.dep - r.addl);
+      }
+      if (r.open || r.add180 || r.addLt || r.del || r.addl) rows.push(r);
+      wdv[k] = r.close;
+    }
+    if (yr === y) out = rows;
+  }
+  out = out || [];
+  const T = k => r2(out.reduce((s, r) => s + r[k], 0));
+  const book = faBook(y).dep, itDep = r2(T('dep') + T('addl'));
+  return { y, from, rows: out, open: T('open'), add180: T('add180'), addLt: T('addLt'), del: T('del'), dep: T('dep'), addl: T('addl'), close: T('close'), itDep, book, diff: r2(itDep - book) };
+}
+/* ---- post book depreciation for an FY as one journal on 31 Mar (re-posting replaces it) ---- */
+const faPosted = y => S.vouchers.find(v => v.type === 'jv' && v.depFy === y);
+async function faDepLedger() {
+  const L = S.settings.ledgers || [];
+  if (L.some(l => l.id === FA_DEP)) return FA_DEP;
+  const ex = L.find(l => l.group === 'indexp' && l.name.toLowerCase() === 'depreciation'); if (ex) return ex.id;
+  const nm = accList().some(l => l.name.toLowerCase() === 'depreciation') ? 'Depreciation on fixed assets' : 'Depreciation';
+  S.settings.ledgers = [...L, { id: FA_DEP, name: nm, group: 'indexp' }]; await saveSettings(); dirty(); return FA_DEP;
+}
+async function faSaleLedger() {
+  const L = S.settings.ledgers || [];
+  if (!L.some(l => l.id === FA_SALE)) { S.settings.ledgers = [...L, { id: FA_SALE, name: 'Loss / (profit) on sale of fixed assets', group: 'indexp' }]; await saveSettings(); dirty(); }
+  return FA_SALE;
+}
+async function faLedger(name) {
+  name = String(name || '').trim() || 'Fixed Assets';
+  const ex = (S.settings.ledgers || []).find(l => l.group === 'fixed' && l.name.toLowerCase() === name.toLowerCase()); if (ex) return ex.id;
+  const r = await saveLedger(accList().some(l => l.name.toLowerCase() === name.toLowerCase()) ? name + ' (asset)' : name, 'fixed', 0);
+  if (r !== true) throw new Error(r);
+  return S.settings.ledgers[S.settings.ledgers.length - 1].id;
+}
+async function faPost(y = faFy()) {
+  if (clOn() && !canV('jv')) { denyToast(); return 'Not allowed for your role'; }
+  const [, fe] = ca2Range(y), B = faBook(y), old = faPosted(y);
+  const miss = B.rows.find(r => (r.dep || r.sold) && !(S.settings.ledgers || []).some(l => l.id === r.ledger && l.group === 'fixed'));
+  if (miss) return `${miss.name} has no Fixed Assets ledger — edit the asset and pick one`;
+  const le = lockErr({ date: fe }, old); if (le) return le;
+  const adj = r2(B.rows.reduce((s, r) => s + (r.sold ? -r.gain : 0), 0)); // assets sold: loss (+) / profit (-) — sale money is already credited to the asset ledger
+  if (!B.dep && !adj && !old) return 'No depreciation to post for this year';
+  if (!B.dep && !adj && old) { await delRec('vouchers', old.id); return true; }
+  const by = new Map(); B.rows.forEach(r => { const x = r2(r.dep + (r.sold ? -r.gain : 0)); if (x) by.set(r.ledger, r2((by.get(r.ledger) || 0) + x)); });
+  const dl = await faDepLedger(), sl = adj ? await faSaleLedger() : '';
+  const rec = old ? clone(old) : { id: uid(), type: 'jv', no: nextNo('jv', fe), date: fe };
+  rec.date = fe; rec.depFy = y; rec.auto = 'dep';
+  rec.entries = [...(B.dep ? [{ a: dl, dr: B.dep, cr: 0 }] : []), ...(adj ? [{ a: sl, dr: Math.max(adj, 0), cr: Math.max(-adj, 0) }] : []), ...[...by.entries()].filter(([, x]) => x).map(([a, x]) => ({ a, dr: Math.max(-x, 0), cr: Math.max(x, 0) }))];
+  rec.amount = B.dep; rec.narration = `Being depreciation on fixed assets for FY ${faFyLbl(y)} (${faCfg().method === 'wdv' ? 'written down value' : 'straight line'} method, Companies Act Schedule II lives) — posted from Fixed Assets`;
+  try { await saveRec('vouchers', rec); } catch (e) { return e.message === 'locked' ? lockErr({ date: fe }, old) : e.message; }
+  if (!old) await bumpNo('jv', rec.no);
+  return true;
+}
+/* depreciation charged in a period (for cash flow add-back) */
+function faDepIn(from, to) { let s = 0; for (const v of S.vouchers) { if (v.date < from || v.date > to || !v.depFy) continue; for (const e of postings(v)) if (accById(e.a).group === 'indexp') s += e.dr - e.cr; } return r2(s); }
+/* ---- save / delete an asset (settings.assets, syncs with settings) ---- */
+function faErr(a) {
+  if (!a.name) return 'Enter the asset name';
+  if (!DEP_RULES.cats[a.cat]) return 'Pick a category';
+  if (!(num(a.cost) > 0)) return 'Enter the cost';
+  if (!/^\d{4}-\d\d-\d\d$/.test(a.buy || '')) return 'Enter the purchase date';
+  if (a.use && a.use < a.buy) return 'Put-to-use date cannot be before the purchase date';
+  if (a.dispDate && a.dispDate < faUse(a)) return 'Sale date cannot be before the put-to-use date';
+  if (!a.ledger) return 'Pick the Fixed Assets ledger';
+  return '';
+}
+async function faSave(a) {
+  if (clOn() && !can('masters')) { denyToast(); return 'Not allowed for your role'; }
+  a = { ...a, name: String(a.name || '').trim(), cost: r2(num(a.cost)), dispValue: r2(num(a.dispValue)) };
+  if (!a.use) a.use = a.buy;
+  const e = faErr(a); if (e) return e;
+  if (!a.id) a.id = 'fa' + uid();
+  const L = [...faAssets()]; const i = L.findIndex(x => x.id === a.id); if (i >= 0) L[i] = a; else L.push(a);
+  S.settings.assets = L; await saveSettings(); dirty(); return true;
+}
+async function faDel(id) {
+  if (clOn() && !can('masters')) return denyToast();
+  const a = faAssets().find(x => x.id === id); if (!a) return;
+  if (!(await ask(`Delete ${esc(a.name)} from the register? Depreciation already posted stays until you post again.`, { ok: 'Delete', danger: true }))) return;
+  S.settings.assets = faAssets().filter(x => x.id !== id); await saveSettings(); dirty(); toast('Deleted'); vFa();
+}
+/* ---- reports (shared CSV / print with the CA pack) ---- */
+function faReport(kind, y = faFy()) {
+  const C = (h, n) => ({ h, n: n ? 1 : 0 }), cfg = faCfg(), lbl = faFyLbl(y);
+  const note = 'Estimate — confirm with your CA.';
+  if (kind === 'reg') {
+    const rows = faAssets().map(a => { const r = faBookRow(a, y); return [a.name, faCat(a).name, accName(a.ledger), fd(a.buy), fd(faUse(a)), r2(num(a.cost)), a.gstItc ? 'Yes' : 'No', [a.supplier, a.billRef].filter(Boolean).join(' · '), a.loc || '', a.serial || '', a.dispDate ? `${fd(a.dispDate)} for ${inr(a.dispValue)}` : '', r.sold ? 0 : r.nbvClose]; });
+    return { title: `Fixed Asset Register — FY ${lbl}`, cards: [['Assets', rows.length], ['Cost', inr(rows.reduce((s, r) => s + r[5], 0))]], sections: [{ title: '', key: 'reg', cols: [C('Asset'), C('Category'), C('Ledger'), C('Bought'), C('Put to use'), C('Cost', 1), C('GST credit taken'), C('Supplier / bill'), C('Location'), C('Serial no.'), C('Sold / scrapped'), C(`Book value 31 Mar ${y + 1}`, 1)], rows }], note };
+  }
+  if (kind === 'book') {
+    const B = faBook(y);
+    const rows = B.rows.map(r => { const a = faAssets().find(x => x.id === r.id) || {}; return [r.name, faLife(a), r.openCost, r.add, r.del, r.closeCost, r.openAcc, r.dep, r.delAcc, r.closeAcc, r.nbvClose, r.sold ? r.gain : '']; });
+    return { title: `Depreciation Schedule (Companies Act) — FY ${lbl}`, cards: [['Method', cfg.method === 'wdv' ? 'Written down value' : 'Straight line'], ['Depreciation', inr(B.dep)], ['Net block', inr(B.nbvClose)], ['Posted', faPosted(y) ? faPosted(y).no : 'Not yet']],
+      sections: [{ title: '', key: 'book', cols: [C('Asset'), C('Life (yrs)', 1), C('Cost 1 Apr', 1), C('Added', 1), C('Sold', 1), C('Cost 31 Mar', 1), C('Dep. 1 Apr', 1), C('Dep. for year', 1), C('Dep. on sold', 1), C('Dep. 31 Mar', 1), C('Net block', 1), C('Profit / (loss) on sale', 1)], rows, total: ['Total', '', B.openCost, B.add, B.del, B.closeCost, B.openAcc, B.dep, B.delAcc, B.closeAcc, B.nbvClose, B.gain] }],
+      note: `${DEP_RULES.ca.sec}: ${DEP_RULES.ca.what} Residual ${DEP_RULES.residualPct}%. ${note}` };
+  }
+  const I = faIt(y);
+  const rows = I.rows.map(r => [r.name, r.rate, r.open, r.add180, r.addLt, r.del, r.dep, r.addl, r.close, r.cease]);
+  return { title: `Income-tax Depreciation Chart — FY ${lbl}`, cards: [['Tax depreciation', inr(I.itDep)], ['Book depreciation', inr(I.book)], ['Difference', inr(I.diff)]],
+    sections: [{ title: '', key: 'it', cols: [C('Block'), C('Rate %', 1), C('Opening WDV', 1), C('Added — 180 days or more', 1), C('Added — under 180 days', 1), C('Sold (money received)', 1), C('Depreciation', 1), C('Additional dep.', 1), C('Closing WDV', 1), C('Note')], rows, total: ['Total', '', I.open, I.add180, I.addLt, I.del, I.dep, I.addl, I.close, ''] },
+      { title: 'Book vs tax (for the tax computation / Form 3CD)', key: 'diff', cols: [C('Detail'), C('Amount', 1)], rows: [['Add back: book depreciation charged in profit & loss', I.book], ['Less: depreciation allowed under income-tax', I.itDep], ['Net reduction in taxable profit', I.diff]] }],
+    note: `${DEP_RULES.it.sec}, ${DEP_RULES.it.rule}. ${note}` };
+}
+/* ---- screen ---- */
+function faAssetSheet(id, pre) {
+  if (clOn() && !can('masters')) return denyToast();
+  const a = { cat: 'pm', gstItc: isGstCo(), ...(faAssets().find(x => x.id === id) || {}), ...(pre || {}) };
+  const fl = (S.settings.ledgers || []).filter(l => l.group === 'fixed');
+  const catO = Object.entries(DEP_RULES.cats).map(([k, c]) => `<option value="${k}" ${a.cat === k ? 'selected' : ''}>${esc(c.name)}${c.block ? ` — ${DEP_RULES.blocks[c.block].rate}% tax, ${c.life} yrs` : ''}</option>`).join('');
+  const ledO = fl.map(l => `<option value="${esc(l.id)}" ${a.ledger === l.id ? 'selected' : ''}>${esc(l.name)}</option>`).join('') + `<option value="__new" ${!a.ledger || !fl.some(l => l.id === a.ledger) ? 'selected' : ''}>+ New ledger (named after the category)</option>`;
+  const f = (k, lab, x = {}) => `<div class="f"><label>${lab}</label><input id="fa_${k}" ${x.t ? `type="${x.t}"` : ''} ${x.n ? 'inputmode="decimal"' : ''} value="${esc(a[k] == null ? '' : a[k])}" placeholder="${x.ph || ''}"></div>`;
+  sheet(id ? 'Edit Asset' : 'Add Asset', `<button class="btn ghost sm" id="fa_fromBill" style="margin-bottom:8px">🧾 Add from purchase bill</button>
+    ${f('name', 'Asset name *', { ph: 'e.g. Lathe machine, Dell laptop' })}
+    <div class="f"><label>Category *</label><select id="fa_cat">${catO}</select></div>
+    <div class="f"><label>Ledger (under Fixed Assets) *</label><select id="fa_ledger">${ledO}</select></div>
+    <div class="f2">${f('buy', 'Purchase date *', { t: 'date' })}${f('use', 'Put-to-use date', { t: 'date' })}</div>
+    <div class="f2">${f('cost', 'Cost (₹) *', { n: 1, ph: 'without GST if credit taken' })}${f('life', 'Useful life (yrs)', { n: 1, ph: String(faCat(a).life) })}</div>
+    <label class="ck"><input type="checkbox" id="fa_gstItc" ${a.gstItc ? 'checked' : ''}> <span>GST credit taken (then cost is without GST)</span></label>
+    ${faCfg().mfg ? `<label class="ck"><input type="checkbox" id="fa_newPM" ${a.newPM ? 'checked' : ''}> <span>New plant / machinery for manufacturing (additional 20% tax depreciation)</span></label>` : ''}
+    <div class="f2">${f('supplier', 'Supplier')}${f('billRef', 'Bill no.')}</div>
+    <div class="f2">${f('loc', 'Location')}${f('serial', 'Serial no.')}</div>
+    <div class="sect">Sold / scrapped (leave blank if still in use)</div>
+    <div class="f2">${f('dispDate', 'Date', { t: 'date' })}${f('dispValue', 'Sale value (₹)', { n: 1 })}</div>`,
+    `<button class="btn full" id="fa_save">Save Asset</button>`);
+  $('#fa_fromBill').onclick = () => {
+    const bills = S.vouchers.filter(v => v.type === 'purchase').sort((x, y) => y.date.localeCompare(x.date));
+    picker({ title: 'Pick purchase bill', empty: 'No purchase bills', list: bills.map(v => ({ id: v.id, label: (party(v.partyId) || {}).name || 'Purchase', sub: `${v.billNo || v.no} · ${fd(v.date)}`, right: inr(v.total) })), onPick: x => {
+      const v = vch(x.id), itc = v.itc !== false && vMode(v) === 'regular' && !v.rcm;
+      const tax = r2(num(v.cgst) + num(v.sgst) + num(v.igst) + num(v.cess));
+      faAssetSheet(id, { ...rd(), name: rd().name || ((v.lines || [])[0] || {}).name || '', buy: v.date, use: rd().use || v.date, cost: itc ? r2(num(v.taxable)) : r2(num(v.taxable) + tax), gstItc: itc, supplier: (party(v.partyId) || {}).name || '', billRef: v.billNo || v.no, billId: v.id });
+    } });
+  };
+  const rd = () => { const o = { ...a }; ['name', 'buy', 'use', 'cost', 'life', 'supplier', 'billRef', 'loc', 'serial', 'dispDate', 'dispValue'].forEach(k => { const el = $('#fa_' + k); if (el) o[k] = el.value.trim(); }); o.cat = $('#fa_cat').value; o.ledger = $('#fa_ledger').value; o.gstItc = $('#fa_gstItc').checked; const np = $('#fa_newPM'); if (np) o.newPM = np.checked; if (!o.dispDate) { o.dispDate = ''; o.dispValue = 0; } return o; };
+  $('#fa_save').onclick = async () => {
+    const o = rd();
+    if (o.ledger === '__new') { if (!o.name) return toast('Enter the asset name'); try { o.ledger = await faLedger(faCat(o).name.replace(/\s*\(.*\)$/, '').replace(/ — .*$/, '')); } catch (e) { return toast(e.message); } }
+    const r = await faSave(o); if (r !== true) return toast(r);
+    closeOv(); toast('Asset saved ✓'); vFa();
+  };
+}
+function vFa(q = {}) {
+  if (q.t) FA_TAB = q.t;
+  hdr('Fixed Assets', { back: true });
+  const y = faFy(), cfg = faCfg(), lbl = faFyLbl(y), tabs = [['reg', 'Register'], ['book', 'Book depreciation'], ['it', 'Income-tax'], ['rules', 'Rates used']];
+  const fyO = faYears().map(x => `<option value="${x}" ${x === y ? 'selected' : ''}>FY ${faFyLbl(x)}</option>`).join('');
+  const tools = k => `<div class="btns" style="margin:8px 0"><button class="btn ghost sm" id="faCsv" data-k="${k}">⬇ CSV</button><button class="btn ghost sm" id="faPrt" data-k="${k}">🖨 Print</button></div>`;
+  let body = '';
+  if (FA_TAB === 'reg') {
+    const A = faAssets();
+    const TT = accTotals(ca2Range(y)[1]), chk = (S.settings.ledgers || []).filter(l => l.group === 'fixed').map(l => { const reg = r2(A.filter(a => a.ledger === l.id).reduce((s, a) => { const r = faBookRow(a, y); return s + (r.sold ? 0 : r.nbvClose); }, 0)); return { l, reg, led: r2(TT.get(l.id) || 0) }; });
+    body = `<button class="btn full" id="faAdd" style="margin-bottom:10px">+ Add Asset</button>
+    <div class="list" id="faList">${A.length ? A.map(a => { const r = faBookRow(a, y); return `<div class="row" data-fa="${esc(a.id)}"><div class="av">🏗</div><div class="m"><div class="t">${esc(a.name)}</div><div class="s">${esc(faCat(a).name)} · ${esc(accName(a.ledger))} · in use ${fd(faUse(a))}</div>${a.dispDate ? `<div class="s rd">Sold ${fd(a.dispDate)} for ${inr(a.dispValue)}</div>` : ''}</div><div class="rt"><div class="a">${inr(a.cost)}</div><div class="s mu" style="font-size:11px">Book ${inr(r.sold ? 0 : r.nbvClose)}</div></div><button class="x" data-del="${esc(a.id)}" aria-label="Delete" style="margin-left:6px">🗑</button></div>`; }).join('') : emptyBox('🏗', 'No assets yet', 'Add machines, furniture, computers, vehicles — or pull one from a purchase bill')}</div>
+    ${chk.length ? `<div class="sect">Register vs ledger on 31 Mar ${y + 1}</div><div class="card" id="faChk" style="font-size:12.5px">${chk.map(c => `<div class="kv"><span>${esc(c.l.name)}</span><span>Register ${inr(c.reg)} · Ledger ${inr(c.led)}${Math.abs(c.reg - c.led) > 0.5 ? ' <span class="tag w">differs</span>' : ' ✓'}</span></div>`).join('')}<div class="mu" style="font-size:11.5px;margin-top:4px">They match once the asset cost is in the ledger (opening balance, purchase journal or payment) and depreciation is posted. Record sale money as a receipt credited to the asset ledger.</div></div>` : ''}${tools('reg')}`;
+  } else if (FA_TAB === 'book') {
+    const B = faBook(y), P = faPosted(y);
+    body = `<div class="card"><div class="f"><label>Method</label><div class="seg" id="faMethod"><button type="button" data-v="slm" class="${cfg.method !== 'wdv' ? 'on' : ''}" onclick="segPick(this)">Straight line</button><button type="button" data-v="wdv" class="${cfg.method === 'wdv' ? 'on' : ''}" onclick="segPick(this)">Written down value</button></div></div><div class="mu" style="font-size:11.5px">Life from Companies Act Schedule II, ${DEP_RULES.residualPct}% residual value, counted by days in use.</div></div>
+    <div class="grid2"><div class="stat"><div class="l">Depreciation FY ${lbl}</div><div class="v" id="faBookDep">${inr(B.dep)}</div></div><div class="stat"><div class="l">Net block 31 Mar ${y + 1}</div><div class="v">${inr(B.nbvClose)}</div></div></div>
+    <div class="card" style="font-size:13px">${P ? `Posted: <a href="#/v/${P.id}">${esc(P.no)}</a> on ${fd(P.date)} for <b id="faPostedAmt">${inr(P.amount)}</b>${Math.abs(num(P.amount) - B.dep) > 0.004 ? ' <span class="tag w">changed — post again</span>' : ' ✓'}` : 'Not posted for this year yet.'}<div class="mu" style="font-size:11.5px;margin-top:4px">Posting makes one journal on 31 Mar: debit Depreciation (indirect expense), credit each asset ledger. For assets sold it also moves the loss / profit on sale (record the sale money as a receipt credited to the asset ledger first). Posting again replaces it. Locked periods cannot be posted.</div><button class="btn" id="faPost" style="margin-top:8px">${P ? 'Post again' : 'Post depreciation'} for FY ${lbl}</button></div>
+    <div class="list">${B.rows.map(r => `<div class="row" style="cursor:default"><div class="m"><div class="t">${esc(r.name)}</div><div class="s">${r.days} days · book value ${inr(r.sold ? 0 : r.nbvClose)}${r.sold ? ` · sold, ${r.gain >= 0 ? 'profit' : 'loss'} ${inr(Math.abs(r.gain))}` : ''}</div></div><div class="rt"><div class="a">${inr(r.dep)}</div></div></div>`).join('') || emptyBox('📉', 'Nothing to depreciate this year')}</div>${tools('book')}`;
+  } else if (FA_TAB === 'it') {
+    const I = faIt(y);
+    body = `<div class="card" style="font-size:13px">${esc(DEP_RULES.it.what)}<label class="ck" style="margin-top:8px"><input type="checkbox" id="faMfg" ${cfg.mfg ? 'checked' : ''}> <span>We manufacture / produce goods or generate power (additional depreciation)</span></label></div>
+    <div class="grid2"><div class="stat"><div class="l">Tax depreciation</div><div class="v" id="faItDep">${inr(I.itDep)}</div></div><div class="stat"><div class="l">Book depreciation</div><div class="v">${inr(I.book)}</div></div></div>
+    <div class="card" style="font-size:12.5px">Difference (tax − book): <b id="faDiff">${inr(I.diff)}</b>. In the tax computation add back book depreciation and deduct tax depreciation (Form 3CD clause 18).</div>
+    <div class="list" id="faItList">${I.rows.map(r => `<div class="row" style="cursor:default"><div class="m"><div class="t">${esc(r.name)} · ${r.rate}%</div><div class="s">Opening ${inr(r.open)} · added ${inr(r.add180)} + ${inr(r.addLt)} (under 180 days, half rate) · sold ${inr(r.del)}</div>${r.addl ? `<div class="s">Additional depreciation ${inr(r.addl)}</div>` : ''}${r.cease ? `<div class="s rd">${esc(r.cease)}</div>` : ''}<div class="s">Closing WDV ${inr(r.close)}</div></div><div class="rt"><div class="a">${inr(r.dep + r.addl)}</div></div></div>`).join('') || emptyBox('📉', 'No blocks this year')}</div>
+    <details class="card" id="faItOpen"><summary><b>Opening WDV from your CA</b> <span class="mu" style="font-size:12px">(older assets not in the register)</span></summary><div style="margin-top:8px"><div class="f"><label>Start from FY (assets put to use before it are inside these figures)</label><input id="faItFrom" inputmode="numeric" value="${cfg.itFrom || ''}" placeholder="${I.from}"></div>${Object.entries(DEP_RULES.blocks).map(([k, b]) => `<div class="f"><label>${esc(b.name)} (${b.rate}%)</label><input data-blk="${k}" inputmode="decimal" value="${num((cfg.itOpen || {})[k]) || ''}" placeholder="0"></div>`).join('')}<button class="btn sec sm" id="faItSave">Save opening WDV</button></div></details>${tools('it')}`;
+  } else {
+    body = `<div class="card" style="font-size:12.5px"><b>Income-tax</b> — <a href="${esc(DEP_RULES.it.src)}" target="_blank" rel="noopener">${esc(DEP_RULES.it.sec)}</a>, <a href="${esc(DEP_RULES.it.srcRates)}" target="_blank" rel="noopener">${esc(DEP_RULES.it.rule)}</a>. Half rate under ${DEP_RULES.it.halfDays} days; additional ${DEP_RULES.it.addl}% (${esc(DEP_RULES.it.addlSec)}).
+      ${Object.entries(DEP_RULES.blocks).map(([k, b]) => `<div class="kv"><span>${esc(b.name)}</span><b>${b.rate}%</b></div>`).join('')}</div>
+    <div class="card" style="font-size:12.5px"><b>Books</b> — <a href="${esc(DEP_RULES.ca.src)}" target="_blank" rel="noopener">${esc(DEP_RULES.ca.sec)}</a>. ${esc(DEP_RULES.ca.what)}
+      ${Object.values(DEP_RULES.cats).map(c => `<div class="kv"><span>${esc(c.name)}</span><span>${c.life ? c.life + ' yrs' : 'none'}${c.block ? ` · tax ${DEP_RULES.blocks[c.block].rate}%` : ''}${c.own ? ' · own estimate' : ''}</span></div>`).join('')}</div>`;
+  }
+  $('#main').innerHTML = `<div class="card" id="faEst" style="font-size:12.5px;border-left:4px solid #f59e0b">Estimate — confirm with your CA. Rates as of ${fd(DEP_RULES.asOf)}.</div>
+  <div class="f2"><div class="f"><label>Financial year</label><select id="faFy">${fyO}</select></div><div></div></div>
+  <div class="seg wrap" id="faTabs" style="margin-bottom:10px">${tabs.map(([k, l]) => `<button type="button" data-v="${k}" class="${FA_TAB === k ? 'on' : ''}" style="font-size:12.5px;min-height:36px" onclick="segPick(this)">${l}</button>`).join('')}</div>${body}`;
+  $('#faTabs').onseg = k => { FA_TAB = k; vFa(); };
+  $('#faFy').onchange = e => { FA_FY = +e.target.value; vFa(); };
+  const ad = $('#faAdd'); if (ad) ad.onclick = () => faAssetSheet(null);
+  $$('#faList [data-fa]').forEach(el => { el.onclick = () => faAssetSheet(el.dataset.fa); });
+  $$('#faList [data-del]').forEach(el => { el.onclick = e => { e.stopPropagation(); faDel(el.dataset.del); }; });
+  const m = $('#faMethod'); if (m) m.onseg = async k => { if (clOn() && !can('masters')) return denyToast(); S.settings.fa = { ...faCfg(), method: k }; await saveSettings(); vFa(); };
+  const po = $('#faPost'); if (po) po.onclick = async () => { const r = await faPost(y); if (r !== true) return toast(r); toast(`Depreciation for FY ${lbl} posted ✓`); vFa(); };
+  const mf = $('#faMfg'); if (mf) mf.onchange = async () => { S.settings.fa = { ...faCfg(), mfg: mf.checked }; await saveSettings(); vFa(); };
+  const is = $('#faItSave'); if (is) is.onclick = async () => { const o = {}; $$('[data-blk]').forEach(el => { if (num(el.value)) o[el.dataset.blk] = r2(num(el.value)); }); S.settings.fa = { ...faCfg(), itFrom: parseInt($('#faItFrom').value) || 0, itOpen: o }; await saveSettings(); toast('Saved ✓'); vFa(); };
+  const cv = $('#faCsv'); if (cv) cv.onclick = () => { const k = cv.dataset.k; download(`${{ reg: 'Fixed_Asset_Register', book: 'Depreciation_Schedule', it: 'IT_Depreciation_Chart' }[k]}_FY${y}.csv`, ca2CSV(faReport(k, y)), 'text/csv'); toast('CSV downloaded'); };
+  const pr = $('#faPrt'); if (pr) pr.onclick = () => ca2Print(faReport(pr.dataset.k, y));
+}
+
 function routeAllowed(a, b) {
   switch (a) {
     case 'new': case 'pay': case 'acv': return canV(b);
@@ -3869,6 +4189,7 @@ function routeAllowed(a, b) {
     case 'r': return can('reports');
     case 'audit': return can('reports');
     case 'compliance': return can('reports');
+    case 'fa': return can('reports');
     case 'queries': return can('query');
     default: return true;
   }
